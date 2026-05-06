@@ -30,7 +30,7 @@ type HydratedEntry = CultCacheEnvelope & {
 };
 
 type BackingStoreTypeReference = string | AnyCultCacheDocumentDefinition;
-type AccessorInput = string | ((value: unknown) => unknown);
+type AccessorInput = string | ((value: any) => unknown);
 
 export class CultCacheBuilder {
   readonly #cache = new CultCache();

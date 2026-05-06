@@ -10,9 +10,11 @@ export type {
   CultCacheDocumentFormatter,
   CultCacheDocumentIndexDefinition,
   CultCacheDocumentRegistry,
+  CultCacheSchema,
   CultCacheDocumentValue,
   CultCacheEnvelope,
   CultCacheIndexScalar,
+  InferCultCacheSchemaValue,
   CultCacheStoreRegistration,
   PushAllOptions,
 } from "./types";

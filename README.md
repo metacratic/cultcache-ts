@@ -14,6 +14,8 @@ This is not an ORM in a fake mustache. It is for cases where you want:
 ## Current Shape
 
 - document types are registered explicitly
+- a document schema only needs a `parse(...)` function, so generated JSON-schema
+  contracts can plug in directly without growing a second hand-written Zod body
 - each persisted envelope stores:
   - `type`
   - `key`
@@ -165,6 +167,10 @@ const combatLogDocument = defineDocumentType({
 ```
 
 If you do not supply one, `CultCacheTS` uses MessagePack plus Zod validation by default.
+
+Zod is no longer mandatory. Any schema object with a `parse(...)` function will
+do, which means generated Ajv-backed JSON-schema contracts can feed the cache
+directly as long as they expose the same parse surface.
 
 The important boundary is this:
 

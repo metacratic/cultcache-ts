@@ -1,6 +1,11 @@
-import { z, type ZodType } from "zod";
-
 export type CultCacheIndexScalar = string | number | boolean | bigint;
+
+export interface CultCacheSchema<TValue = unknown> {
+  parse(input: unknown): TValue;
+}
+
+export type InferCultCacheSchemaValue<TSchema extends CultCacheSchema> =
+  TSchema extends CultCacheSchema<infer TValue> ? TValue : never;
 
 export type CultCacheDocumentFieldName<TValue> = TValue extends object ? Extract<keyof TValue, string> : never;
 
@@ -18,19 +23,19 @@ export interface CultCacheDocumentIndexDefinition<TValue> {
   accessor: CultCacheDocumentAccessor<TValue>;
 }
 
-export interface CultCacheDocumentDefinition<TSchema extends ZodType = ZodType> {
+export interface CultCacheDocumentDefinition<TSchema extends CultCacheSchema = CultCacheSchema> {
   type: string;
   schema: TSchema;
   schemaName?: string;
   global?: boolean;
-  name?: CultCacheDocumentAccessor<z.infer<TSchema>>;
+  name?: CultCacheDocumentAccessor<InferCultCacheSchemaValue<TSchema>>;
   indexes?:
-    | Readonly<Record<string, CultCacheDocumentAccessor<z.infer<TSchema>>>>
-    | readonly CultCacheDocumentIndexDefinition<z.infer<TSchema>>[];
-  formatter?: CultCacheDocumentFormatter<z.infer<TSchema>>;
+    | Readonly<Record<string, CultCacheDocumentAccessor<InferCultCacheSchemaValue<TSchema>>>>
+    | readonly CultCacheDocumentIndexDefinition<InferCultCacheSchemaValue<TSchema>>[];
+  formatter?: CultCacheDocumentFormatter<InferCultCacheSchemaValue<TSchema>>;
 }
 
-export type CultCacheDocumentValue<TDefinition extends CultCacheDocumentDefinition> = z.infer<
+export type CultCacheDocumentValue<TDefinition extends CultCacheDocumentDefinition> = InferCultCacheSchemaValue<
   TDefinition["schema"]
 >;
 

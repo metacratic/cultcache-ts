@@ -10,7 +10,7 @@ import { z } from "zod";
 import { CultCache } from "../src/cult-cache";
 import { defineDocumentRegistry, defineDocumentType } from "../src/document";
 import { SingleFileMessagePackBackingStore } from "../src/single-file-messagepack-backing-store";
-import type { CacheBackingStore, CultCacheEnvelope } from "../src/types";
+import type { CacheBackingStore, CultCacheEnvelope, CultCacheSchema } from "../src/types";
 
 test("CultCache supports registry bootstrap, global documents, and lookup by name and index", async () => {
   const itemDocument = defineDocumentType({
@@ -178,4 +178,60 @@ test("CultCache fails closed on unknown or illegal persisted polymorphic state",
     async () => cacheWithDuplicateGlobal.pullAllBackingStores(),
     /has multiple persisted entries/,
   );
+});
+
+test("CultCache accepts generated parse-style schemas without a Zod mirror", async () => {
+  type GeneratedSettings = {
+    schema_version: "generated.settings.v0";
+    theme: string;
+    retries: number;
+  };
+
+  const generatedSchema: CultCacheSchema<GeneratedSettings> = {
+    parse(input: unknown): GeneratedSettings {
+      if (!input || typeof input !== "object") {
+        throw new Error("generated settings must be an object");
+      }
+
+      const value = input as Record<string, unknown>;
+      if (value.schema_version !== "generated.settings.v0") {
+        throw new Error("generated settings schema_version mismatch");
+      }
+      if (typeof value.theme !== "string") {
+        throw new Error("generated settings theme must be a string");
+      }
+      if (typeof value.retries !== "number") {
+        throw new Error("generated settings retries must be a number");
+      }
+
+      return {
+        schema_version: "generated.settings.v0",
+        theme: value.theme,
+        retries: value.retries,
+      };
+    },
+  };
+
+  const generatedDocument = defineDocumentType({
+    type: "generated-settings",
+    schema: generatedSchema,
+    global: true,
+  });
+
+  const storePath = join(await mkdtemp(join(tmpdir(), "cultcache-ts-")), "generated.msgpack");
+  const cache = CultCache.builder()
+    .withDocumentType(generatedDocument)
+    .withGenericStore(new SingleFileMessagePackBackingStore(storePath))
+    .build();
+
+  await cache.putGlobal(generatedDocument, {
+    schema_version: "generated.settings.v0",
+    theme: "ash",
+    retries: 3,
+  });
+
+  const settings = cache.getRequiredGlobal(generatedDocument);
+  assert.equal(settings.schema_version, "generated.settings.v0");
+  assert.equal(settings.theme, "ash");
+  assert.equal(settings.retries, 3);
 });

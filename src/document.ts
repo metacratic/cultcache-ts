@@ -1,8 +1,11 @@
-import type { ZodType } from "zod";
+import type {
+  AnyCultCacheDocumentDefinition,
+  CultCacheDocumentDefinition,
+  CultCacheDocumentRegistry,
+  CultCacheSchema,
+} from "./types";
 
-import type { AnyCultCacheDocumentDefinition, CultCacheDocumentDefinition, CultCacheDocumentRegistry } from "./types";
-
-export function defineDocumentType<TSchema extends ZodType>(
+export function defineDocumentType<TSchema extends CultCacheSchema>(
   definition: CultCacheDocumentDefinition<TSchema>,
 ): CultCacheDocumentDefinition<TSchema> {
   if (!definition.type || definition.type.trim().length === 0) {
