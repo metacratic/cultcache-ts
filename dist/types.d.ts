@@ -1,5 +1,8 @@
-import { z, type ZodType } from "zod";
 export type CultCacheIndexScalar = string | number | boolean | bigint;
+export interface CultCacheSchema<TValue = unknown> {
+    parse(input: unknown): TValue;
+}
+export type InferCultCacheSchemaValue<TSchema extends CultCacheSchema> = TSchema extends CultCacheSchema<infer TValue> ? TValue : never;
 export type CultCacheDocumentFieldName<TValue> = TValue extends object ? Extract<keyof TValue, string> : never;
 export type CultCacheDocumentAccessor<TValue> = CultCacheDocumentFieldName<TValue> | ((value: TValue) => CultCacheIndexScalar | null | undefined);
 export interface CultCacheDocumentFormatter<TValue> {
@@ -10,16 +13,16 @@ export interface CultCacheDocumentIndexDefinition<TValue> {
     name: string;
     accessor: CultCacheDocumentAccessor<TValue>;
 }
-export interface CultCacheDocumentDefinition<TSchema extends ZodType = ZodType> {
+export interface CultCacheDocumentDefinition<TSchema extends CultCacheSchema = CultCacheSchema> {
     type: string;
     schema: TSchema;
     schemaName?: string;
     global?: boolean;
-    name?: CultCacheDocumentAccessor<z.infer<TSchema>>;
-    indexes?: Readonly<Record<string, CultCacheDocumentAccessor<z.infer<TSchema>>>> | readonly CultCacheDocumentIndexDefinition<z.infer<TSchema>>[];
-    formatter?: CultCacheDocumentFormatter<z.infer<TSchema>>;
+    name?: CultCacheDocumentAccessor<InferCultCacheSchemaValue<TSchema>>;
+    indexes?: Readonly<Record<string, CultCacheDocumentAccessor<InferCultCacheSchemaValue<TSchema>>>> | readonly CultCacheDocumentIndexDefinition<InferCultCacheSchemaValue<TSchema>>[];
+    formatter?: CultCacheDocumentFormatter<InferCultCacheSchemaValue<TSchema>>;
 }
-export type CultCacheDocumentValue<TDefinition extends CultCacheDocumentDefinition> = z.infer<TDefinition["schema"]>;
+export type CultCacheDocumentValue<TDefinition extends CultCacheDocumentDefinition> = InferCultCacheSchemaValue<TDefinition["schema"]>;
 export type AnyCultCacheDocumentDefinition = CultCacheDocumentDefinition<any>;
 export interface CultCacheDocumentRegistry<TDefinitions extends readonly AnyCultCacheDocumentDefinition[] = readonly AnyCultCacheDocumentDefinition[]> {
     readonly definitions: TDefinitions;
