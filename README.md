@@ -114,6 +114,10 @@ const settings = cache.getRequiredGlobal(settingsDocument);
 - `delete(...)`
 - `deleteGlobal(...)`
 - `snapshot()`
+- `getEnvelope(...)`
+- `getRequiredEnvelope(...)`
+- `getGlobalEnvelope(...)`
+- `putEnvelope(...)`
 
 ## Name, Index, and Global Semantics
 
@@ -179,6 +183,21 @@ The important boundary is this:
 - the decoded value is still validated against the declared schema
 
 So callers get typed values, and the persistence layer does not become an open polymorphic sewer.
+
+## Raw Envelope Fast Path
+
+For bit-compatible neighbors such as CultNet peers that already share the same
+formatter contract, `CultCacheTS` can now move the persisted envelope directly:
+
+- `getEnvelope(...)` / `getRequiredEnvelope(...)` export the canonical
+  MessagePack payload bytes for a typed document
+- `putEnvelope(...)` ingests that envelope into another cache instance without
+  re-encoding the payload first
+
+That still is not magic shared memory. The cache decodes once so lookups and
+typed reads stay honest. But it stops doing the stupid part where identical
+MessagePack payload bytes get decoded into a generic value, then re-encoded
+into the same bytes again just to cross the room.
 
 ## Security Model
 

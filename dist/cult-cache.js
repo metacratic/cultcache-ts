@@ -123,6 +123,18 @@ class CultCache {
         }
         return value;
     }
+    getEnvelope(definition, key) {
+        this.#requireDefinition(definition);
+        const entry = this.#entries.get(this.#entryId(definition.type, key));
+        return entry ? this.#toEnvelope(entry) : undefined;
+    }
+    getRequiredEnvelope(definition, key) {
+        const entry = this.getEnvelope(definition, key);
+        if (!entry) {
+            throw new Error(`CultCache has no "${definition.type}" envelope at key "${key}".`);
+        }
+        return entry;
+    }
     getGlobal(definition) {
         const registered = this.#requireDefinition(definition);
         if (!registered.global) {
@@ -137,6 +149,14 @@ class CultCache {
             throw new Error(`CultCache has no global "${definition.type}" document.`);
         }
         return value;
+    }
+    getGlobalEnvelope(definition) {
+        const registered = this.#requireDefinition(definition);
+        if (!registered.global) {
+            throw new Error(`CultCache document type "${definition.type}" is not marked as global.`);
+        }
+        const globalKey = this.#globalKeys.get(definition.type);
+        return globalKey ? this.getEnvelope(definition, globalKey) : undefined;
     }
     getAll(definition) {
         this.#requireDefinition(definition);
@@ -195,6 +215,40 @@ class CultCache {
         if (registered.global) {
             const existingGlobalKey = this.#globalKeys.get(definition.type);
             if (existingGlobalKey && existingGlobalKey !== key) {
+                await this.delete(definition, existingGlobalKey);
+            }
+        }
+        await route.primary.push(entry);
+        await Promise.all(route.mirrors.map(async (mirror) => mirror.push(entry)));
+        this.#applyHydratedEntry(registered, entry, parsed, "put");
+        return parsed;
+    }
+    async putEnvelope(definition, envelope) {
+        const registered = this.#requireDefinition(definition);
+        if (envelope.type !== definition.type) {
+            throw new Error(`CultCache envelope type "${envelope.type}" does not match definition "${definition.type}".`);
+        }
+        if (!envelope.key || envelope.key.trim().length === 0) {
+            throw new Error(`CultCache envelope key for type "${definition.type}" must be non-empty.`);
+        }
+        if (!envelope.storedAt || envelope.storedAt.trim().length === 0) {
+            throw new Error(`CultCache envelope storedAt for type "${definition.type}" must be non-empty.`);
+        }
+        const payload = this.#cloneBytes(envelope.payload);
+        const parsed = registered.formatter.decode(payload);
+        const entry = {
+            key: envelope.key,
+            type: envelope.type,
+            payload,
+            storedAt: envelope.storedAt,
+        };
+        const route = this.#resolveRoute(definition.type);
+        if (!route.primary) {
+            throw new Error(`No backing store is registered for document type "${definition.type}".`);
+        }
+        if (registered.global) {
+            const existingGlobalKey = this.#globalKeys.get(definition.type);
+            if (existingGlobalKey && existingGlobalKey !== entry.key) {
                 await this.delete(definition, existingGlobalKey);
             }
         }

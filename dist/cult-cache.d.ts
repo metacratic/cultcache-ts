@@ -21,8 +21,11 @@ export declare class CultCache {
     pullAllBackingStores(): Promise<void>;
     get<TDefinition extends AnyCultCacheDocumentDefinition>(definition: TDefinition, key: string): CultCacheDocumentValue<TDefinition> | undefined;
     getRequired<TDefinition extends AnyCultCacheDocumentDefinition>(definition: TDefinition, key: string): CultCacheDocumentValue<TDefinition>;
+    getEnvelope<TDefinition extends AnyCultCacheDocumentDefinition>(definition: TDefinition, key: string): CultCacheEnvelope | undefined;
+    getRequiredEnvelope<TDefinition extends AnyCultCacheDocumentDefinition>(definition: TDefinition, key: string): CultCacheEnvelope;
     getGlobal<TDefinition extends AnyCultCacheDocumentDefinition>(definition: TDefinition): CultCacheDocumentValue<TDefinition> | undefined;
     getRequiredGlobal<TDefinition extends AnyCultCacheDocumentDefinition>(definition: TDefinition): CultCacheDocumentValue<TDefinition>;
+    getGlobalEnvelope<TDefinition extends AnyCultCacheDocumentDefinition>(definition: TDefinition): CultCacheEnvelope | undefined;
     getAll<TDefinition extends AnyCultCacheDocumentDefinition>(definition: TDefinition): CultCacheDocumentValue<TDefinition>[];
     getKeyByName<TDefinition extends AnyCultCacheDocumentDefinition>(definition: TDefinition, name: string): string | undefined;
     getIdByName<TDefinition extends AnyCultCacheDocumentDefinition>(definition: TDefinition, name: string): string | undefined;
@@ -31,6 +34,7 @@ export declare class CultCache {
     getIdByIndex<TDefinition extends AnyCultCacheDocumentDefinition>(definition: TDefinition, indexName: string, value: string): string | undefined;
     getByIndex<TDefinition extends AnyCultCacheDocumentDefinition>(definition: TDefinition, indexName: string, value: string): CultCacheDocumentValue<TDefinition> | undefined;
     put<TDefinition extends AnyCultCacheDocumentDefinition>(definition: TDefinition, key: string, value: CultCacheDocumentValue<TDefinition>): Promise<CultCacheDocumentValue<TDefinition>>;
+    putEnvelope<TDefinition extends AnyCultCacheDocumentDefinition>(definition: TDefinition, envelope: CultCacheEnvelope): Promise<CultCacheDocumentValue<TDefinition>>;
     putGlobal<TDefinition extends AnyCultCacheDocumentDefinition>(definition: TDefinition, value: CultCacheDocumentValue<TDefinition>): Promise<CultCacheDocumentValue<TDefinition>>;
     update<TDefinition extends AnyCultCacheDocumentDefinition>(definition: TDefinition, key: string, updater: (current: CultCacheDocumentValue<TDefinition> | undefined) => CultCacheDocumentValue<TDefinition>): Promise<CultCacheDocumentValue<TDefinition>>;
     updateGlobal<TDefinition extends AnyCultCacheDocumentDefinition>(definition: TDefinition, updater: (current: CultCacheDocumentValue<TDefinition> | undefined) => CultCacheDocumentValue<TDefinition>): Promise<CultCacheDocumentValue<TDefinition>>;

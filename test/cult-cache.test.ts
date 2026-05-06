@@ -235,3 +235,38 @@ test("CultCache accepts generated parse-style schemas without a Zod mirror", asy
   assert.equal(settings.theme, "ash");
   assert.equal(settings.retries, 3);
 });
+
+test("CultCache can ingest raw envelopes without re-encoding the payload", async () => {
+  const noteDocument = defineDocumentType({
+    type: "note",
+    schema: z.object({
+      title: z.string(),
+      body: z.string(),
+    }),
+  });
+
+  const storePath = join(await mkdtemp(join(tmpdir(), "cultcache-ts-")), "cache.msgpack");
+  const origin = CultCache.builder()
+    .withDocumentType(noteDocument)
+    .withGenericStore(new SingleFileMessagePackBackingStore(storePath))
+    .build();
+  const target = CultCache.builder()
+    .withDocumentType(noteDocument)
+    .withGenericStore(new SingleFileMessagePackBackingStore(join(await mkdtemp(join(tmpdir(), "cultcache-ts-")), "target.msgpack")))
+    .build();
+
+  await origin.put(noteDocument, "note:hello", {
+    title: "Hello",
+    body: "world",
+  });
+
+  const envelope = origin.getRequiredEnvelope(noteDocument, "note:hello");
+  const applied = await target.putEnvelope(noteDocument, envelope);
+
+  assert.deepEqual(applied, {
+    title: "Hello",
+    body: "world",
+  });
+  assert.deepEqual(target.getRequired(noteDocument, "note:hello"), applied);
+  assert.deepEqual(target.getRequiredEnvelope(noteDocument, "note:hello").payload, envelope.payload);
+});
