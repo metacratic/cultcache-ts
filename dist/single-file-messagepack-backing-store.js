@@ -8,7 +8,7 @@ const zod_1 = require("zod");
 const envelopeSchema = zod_1.z.object({
     key: zod_1.z.string().min(1),
     type: zod_1.z.string().min(1),
-    payload: zod_1.z.unknown(),
+    payload: zod_1.z.instanceof(Uint8Array),
     storedAt: zod_1.z.string().min(1),
 });
 const envelopeArraySchema = zod_1.z.array(envelopeSchema);

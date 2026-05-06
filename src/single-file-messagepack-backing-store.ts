@@ -9,7 +9,7 @@ import type { CacheBackingStore, CultCacheEnvelope, PushAllOptions } from "./typ
 const envelopeSchema = z.object({
   key: z.string().min(1),
   type: z.string().min(1),
-  payload: z.unknown(),
+  payload: z.instanceof(Uint8Array),
   storedAt: z.string().min(1),
 });
 

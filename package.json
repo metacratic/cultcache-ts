@@ -9,7 +9,8 @@
   ],
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "typecheck": "tsc -p tsconfig.json --pretty false"
+    "typecheck": "tsc -p tsconfig.json --pretty false",
+    "test": "npm run build && tsc -p tsconfig.test.json && node --test dist-test/test/cult-cache.test.js"
   },
   "keywords": [
     "messagepack",
