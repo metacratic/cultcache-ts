@@ -12,6 +12,12 @@ const envelopeSchema = zod_1.z.object({
     storedAt: zod_1.z.string().min(1),
 });
 const envelopeArraySchema = zod_1.z.array(envelopeSchema);
+const legacyEnvelopeArraySchema = zod_1.z.array(zod_1.z.object({
+    key: zod_1.z.string().min(1),
+    type: zod_1.z.string().min(1),
+    payload: zod_1.z.unknown(),
+    storedAt: zod_1.z.string().min(1),
+}));
 class SingleFileMessagePackBackingStore {
     filePath;
     #writeQueue = Promise.resolve();
@@ -21,7 +27,23 @@ class SingleFileMessagePackBackingStore {
     async pullAll() {
         try {
             const data = await (0, promises_1.readFile)(this.filePath);
-            return envelopeArraySchema.parse((0, msgpack_1.decode)(data));
+            const decoded = legacyEnvelopeArraySchema.parse((0, msgpack_1.decode)(data));
+            let repairedLegacyPayload = false;
+            const normalized = decoded.map((entry) => {
+                const payload = normalizePayload(entry.payload);
+                if (payload !== entry.payload) {
+                    repairedLegacyPayload = true;
+                }
+                return {
+                    ...entry,
+                    payload,
+                };
+            });
+            const parsed = envelopeArraySchema.parse(normalized);
+            if (repairedLegacyPayload) {
+                await this.#writeAll(parsed);
+            }
+            return parsed;
         }
         catch (error) {
             const code = error.code;
@@ -88,3 +110,21 @@ class SingleFileMessagePackBackingStore {
     }
 }
 exports.SingleFileMessagePackBackingStore = SingleFileMessagePackBackingStore;
+function normalizePayload(payload) {
+    if (payload instanceof Uint8Array) {
+        return payload;
+    }
+    if (isObject(payload) &&
+        payload.type === "Buffer" &&
+        Array.isArray(payload.data) &&
+        payload.data.every((value) => Number.isInteger(value) && value >= 0 && value <= 255)) {
+        return Uint8Array.from(payload.data);
+    }
+    if (Array.isArray(payload) && payload.every((value) => Number.isInteger(value) && value >= 0 && value <= 255)) {
+        return Uint8Array.from(payload);
+    }
+    return (0, msgpack_1.encode)(payload);
+}
+function isObject(value) {
+    return typeof value === "object" && value !== null;
+}

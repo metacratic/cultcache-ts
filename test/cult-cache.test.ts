@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
-import { mkdtemp } from "node:fs/promises";
+import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { encode } from "@msgpack/msgpack";
+import { decode, encode } from "@msgpack/msgpack";
 import { z } from "zod";
 
 import { CultCache } from "../src/cult-cache";
@@ -269,4 +269,44 @@ test("CultCache can ingest raw envelopes without re-encoding the payload", async
   });
   assert.deepEqual(target.getRequired(noteDocument, "note:hello"), applied);
   assert.deepEqual(target.getRequiredEnvelope(noteDocument, "note:hello").payload, envelope.payload);
+});
+
+test("SingleFileMessagePackBackingStore heals legacy envelopes whose payload was persisted as an object", async () => {
+  const noteDocument = defineDocumentType({
+    type: "note",
+    schema: z.object({
+      title: z.string(),
+      body: z.string(),
+    }),
+  });
+
+  const storePath = join(await mkdtemp(join(tmpdir(), "cultcache-ts-")), "legacy.msgpack");
+  const envelopePayload = {
+    title: "Hello",
+    body: "world",
+  };
+
+  await writeFile(
+    storePath,
+    encode([
+      {
+        key: "note:hello",
+        type: "note",
+        payload: envelopePayload,
+        storedAt: new Date().toISOString(),
+      },
+    ]),
+  );
+
+  const cache = CultCache.builder()
+    .withDocumentType(noteDocument)
+    .withGenericStore(new SingleFileMessagePackBackingStore(storePath))
+    .build();
+
+  await cache.pullAllBackingStores();
+  assert.deepEqual(cache.getRequired(noteDocument, "note:hello"), envelopePayload);
+
+  const rewritten = decode(await readFile(storePath)) as Array<{ payload: unknown }>;
+  assert.equal(rewritten.length, 1);
+  assert.ok(rewritten[0]?.payload instanceof Uint8Array);
 });

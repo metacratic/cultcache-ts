@@ -14,6 +14,14 @@ const envelopeSchema = z.object({
 });
 
 const envelopeArraySchema = z.array(envelopeSchema);
+const legacyEnvelopeArraySchema = z.array(
+  z.object({
+    key: z.string().min(1),
+    type: z.string().min(1),
+    payload: z.unknown(),
+    storedAt: z.string().min(1),
+  }),
+);
 
 export class SingleFileMessagePackBackingStore implements CacheBackingStore {
   readonly filePath: string;
@@ -27,7 +35,26 @@ export class SingleFileMessagePackBackingStore implements CacheBackingStore {
   async pullAll(): Promise<CultCacheEnvelope[]> {
     try {
       const data = await readFile(this.filePath);
-      return envelopeArraySchema.parse(decode(data)) as CultCacheEnvelope[];
+      const decoded = legacyEnvelopeArraySchema.parse(decode(data));
+      let repairedLegacyPayload = false;
+      const normalized = decoded.map((entry) => {
+        const payload = normalizePayload(entry.payload);
+        if (payload !== entry.payload) {
+          repairedLegacyPayload = true;
+        }
+
+        return {
+          ...entry,
+          payload,
+        };
+      });
+      const parsed = envelopeArraySchema.parse(normalized) as CultCacheEnvelope[];
+
+      if (repairedLegacyPayload) {
+        await this.#writeAll(parsed);
+      }
+
+      return parsed;
     } catch (error) {
       const code = (error as NodeJS.ErrnoException).code;
       if (code === "ENOENT") {
@@ -108,4 +135,29 @@ export class SingleFileMessagePackBackingStore implements CacheBackingStore {
       throw error;
     }
   }
+}
+
+function normalizePayload(payload: unknown): Uint8Array {
+  if (payload instanceof Uint8Array) {
+    return payload;
+  }
+
+  if (
+    isObject(payload) &&
+    payload.type === "Buffer" &&
+    Array.isArray(payload.data) &&
+    payload.data.every((value) => Number.isInteger(value) && value >= 0 && value <= 255)
+  ) {
+    return Uint8Array.from(payload.data);
+  }
+
+  if (Array.isArray(payload) && payload.every((value) => Number.isInteger(value) && value >= 0 && value <= 255)) {
+    return Uint8Array.from(payload);
+  }
+
+  return encode(payload);
+}
+
+function isObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
 }
