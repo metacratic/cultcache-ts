@@ -1,0 +1,265 @@
+:root {
+  color-scheme: light;
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  color: #1b2421;
+  background: #f4f2ea;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-width: 760px;
+  min-height: 100vh;
+}
+
+button,
+input {
+  font: inherit;
+}
+
+code {
+  font-family: "Cascadia Code", "SFMono-Regular", Consolas, monospace;
+  font-size: 0.92em;
+}
+
+.workspace {
+  display: grid;
+  grid-template-columns: 310px minmax(0, 1fr);
+  min-height: 100vh;
+}
+
+.sidebar {
+  border-right: 1px solid #cfd7d0;
+  background: #fffdf7;
+  padding: 22px;
+}
+
+.brand h1 {
+  margin: 0;
+  font-size: 25px;
+  line-height: 1.05;
+}
+
+.brand p {
+  margin: 10px 0 18px;
+  color: #61716b;
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.dropzone {
+  display: grid;
+  gap: 6px;
+  place-items: center;
+  min-height: 132px;
+  border: 2px dashed #8ba59e;
+  border-radius: 8px;
+  background: #eef7f4;
+  color: #123f3b;
+  cursor: pointer;
+  text-align: center;
+}
+
+.is-dragging .dropzone {
+  border-color: #0f766e;
+  background: #dff4ef;
+}
+
+.dropzone input {
+  position: absolute;
+  inline-size: 1px;
+  block-size: 1px;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.drop-title {
+  font-weight: 800;
+}
+
+.drop-copy {
+  color: #61716b;
+  font-size: 13px;
+}
+
+.summary {
+  display: grid;
+  gap: 10px;
+  margin-top: 16px;
+}
+
+.metric {
+  border: 1px solid #d6ddd7;
+  border-radius: 8px;
+  background: #ffffff;
+  padding: 11px;
+}
+
+.metric span {
+  display: block;
+  color: #61716b;
+  font-size: 12px;
+}
+
+.metric strong {
+  display: block;
+  margin-top: 4px;
+  overflow-wrap: anywhere;
+}
+
+.content {
+  padding: 18px;
+  overflow: auto;
+}
+
+.hero {
+  display: grid;
+  align-content: center;
+  min-height: calc(100vh - 36px);
+  max-width: 620px;
+}
+
+.hero h2 {
+  margin: 0;
+  font-size: 42px;
+  line-height: 1;
+}
+
+.hero p {
+  margin: 14px 0 0;
+  color: #61716b;
+  line-height: 1.55;
+}
+
+.columns {
+  display: grid;
+  grid-template-columns: minmax(260px, 0.82fr) minmax(420px, 1.18fr);
+  gap: 14px;
+}
+
+.bottom {
+  margin-top: 14px;
+}
+
+.panel {
+  min-width: 0;
+  border: 1px solid #cfd7d0;
+  border-radius: 8px;
+  background: #ffffff;
+  overflow: hidden;
+}
+
+.panel header {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 12px;
+  align-items: center;
+  border-bottom: 1px solid #dce2dd;
+  padding: 11px 12px;
+}
+
+.panel h2 {
+  margin: 0;
+  font-size: 15px;
+}
+
+.panel header span {
+  overflow: hidden;
+  color: #61716b;
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.list {
+  display: grid;
+  gap: 8px;
+  max-height: 430px;
+  overflow: auto;
+  padding: 10px;
+}
+
+.row {
+  width: 100%;
+  border: 1px solid #d6ddd7;
+  border-radius: 6px;
+  background: #fbfcfa;
+  color: inherit;
+  padding: 10px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.row[aria-selected="true"] {
+  border-color: #0f766e;
+  box-shadow: inset 3px 0 0 #0f766e;
+}
+
+.row strong,
+.row span {
+  display: block;
+  overflow-wrap: anywhere;
+}
+
+.row span {
+  margin-top: 4px;
+  color: #61716b;
+  font-size: 12px;
+}
+
+.detail {
+  min-height: 360px;
+}
+
+.detail > dl,
+.detail > pre,
+.detail > .error {
+  margin: 12px;
+}
+
+dl {
+  display: grid;
+  grid-template-columns: 120px minmax(0, 1fr);
+  gap: 8px 12px;
+}
+
+dt {
+  color: #61716b;
+  font-size: 12px;
+}
+
+dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+pre {
+  max-height: 440px;
+  overflow: auto;
+  border-radius: 6px;
+  background: #15201e;
+  color: #f1fff9;
+  padding: 12px;
+  font-family: "Cascadia Code", "SFMono-Regular", Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.error {
+  border: 1px solid #e0ada6;
+  border-radius: 6px;
+  background: #fff3f0;
+  color: #9c332f;
+  padding: 10px;
+  overflow-wrap: anywhere;
+}
+
+.empty {
+  padding: 18px;
+  color: #61716b;
+}

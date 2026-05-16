@@ -10,6 +10,7 @@ import { decode, encode } from "@msgpack/msgpack";
 import { z } from "zod";
 
 import { CultCache } from "../src/cult-cache";
+import { inspectCultCacheBytes } from "../src/cult-cache-inspector";
 import { defineDocumentRegistry, defineDocumentType } from "../src/document";
 import { SingleFileMessagePackBackingStore } from "../src/single-file-messagepack-backing-store";
 import type { CacheBackingStore, CultCacheEnvelope, CultCacheSchema } from "../src/types";
@@ -541,6 +542,27 @@ test("CultCache interop reader accepts missing compatible trailing slots and rej
     () => readTsInteropStore(mismatch),
     /Expected string/u,
   );
+});
+
+test("CultCache inspector decodes v1 store catalog and record payloads from bytes", async () => {
+  const tempDir = await mkdtemp(join(tmpdir(), "cultcache-inspector-"));
+  const file = join(tempDir, "cache.cc");
+  const written = await writeTsInteropStore(file, "inspector");
+
+  const inspection = inspectCultCacheBytes(file, await readFile(file));
+  assert.equal(inspection.format, "cultcache.store.v1");
+  assert.equal(inspection.catalog.length, 1);
+  assert.equal(inspection.catalog[0]?.schemaName, "cultcache.interop-note");
+  assert.equal(inspection.records.length, 1);
+  assert.equal(inspection.records[0]?.key, written.documentId);
+  assert.deepEqual(inspection.records[0]?.payloadPreview, [
+    "cultcache.interop_note.v1",
+    written.documentId,
+    written.authorRuntimeId,
+    written.title,
+    written.body,
+    written.tags,
+  ]);
 });
 
 interface InteropNote {

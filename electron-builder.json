@@ -1,0 +1,27 @@
+{
+  "appId": "com.gamecult.cultcache.inspector",
+  "productName": "CultCache Inspector",
+  "executableName": "CultCacheInspector",
+  "asar": false,
+  "extraMetadata": {
+    "main": "electron/main.cjs"
+  },
+  "files": [
+    "electron/main.cjs",
+    "dist-inspector/**/*"
+  ],
+  "directories": {
+    "output": "release-inspector"
+  },
+  "win": {
+    "signAndEditExecutable": false,
+    "target": ["portable"],
+    "artifactName": "CultCache-Inspector-${version}.${ext}"
+  },
+  "mac": {
+    "target": ["dir"]
+  },
+  "linux": {
+    "target": ["dir"]
+  }
+}

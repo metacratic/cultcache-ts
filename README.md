@@ -32,6 +32,34 @@ This is not an ORM in a fake mustache. It is for cases where you want:
 
 That keeps the polymorphic boundary tight without making callers write boilerplate by candlelight.
 
+## Inspector
+
+CultCache files may use the `.cc` extension. The bytes are still the canonical
+`cultcache.store.v1` MessagePack snapshot; the extension is the human handle, not
+a second format.
+
+Run the local inspector during development:
+
+```sh
+npm run dev:inspector
+```
+
+Build the Vite inspector bundle:
+
+```sh
+npm run build:inspector
+```
+
+Build a desktop package:
+
+```sh
+npm run dist:inspector
+```
+
+The inspector is read-only. Drop a `.cc`, `.msgpack`, or `.mpack` file onto the
+window to inspect the snapshot header, schema catalog, records, and decoded
+MessagePack payload previews without registering application schemas.
+
 ## Example
 
 ```ts
