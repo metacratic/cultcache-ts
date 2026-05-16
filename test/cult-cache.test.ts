@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { exec, execFile } from "node:child_process";
+import { access, mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { homedir, tmpdir } from "node:os";
+import { join, resolve } from "node:path";
 import { test } from "node:test";
+import { promisify } from "node:util";
 
 import { decode, encode } from "@msgpack/msgpack";
 import { z } from "zod";
@@ -11,6 +13,35 @@ import { CultCache } from "../src/cult-cache";
 import { defineDocumentRegistry, defineDocumentType } from "../src/document";
 import { SingleFileMessagePackBackingStore } from "../src/single-file-messagepack-backing-store";
 import type { CacheBackingStore, CultCacheEnvelope, CultCacheSchema } from "../src/types";
+
+const execFileAsync = promisify(execFile);
+const execAsync = promisify(exec);
+const cargoCommand = process.env.CARGO ?? (process.platform === "win32" ? join(homedir(), ".cargo", "bin", "cargo.exe") : "cargo");
+const dotnetCommand = process.env.DOTNET ?? (process.platform === "win32" ? join("C:", "Program Files", "dotnet", "dotnet.exe") : "dotnet");
+const cultCacheTsRoot = resolve(__dirname, "../..");
+const cultcacheRsRoot = resolve(cultCacheTsRoot, "..", "cultcache-rs");
+const cultLibRoot = resolve(cultCacheTsRoot, "..", "CultLib");
+const rustInteropBinary = resolve(
+  cultcacheRsRoot,
+  "target",
+  "debug",
+  "examples",
+  process.platform === "win32" ? "cultcache_interop.exe" : "cultcache_interop",
+);
+const csharpInteropProject = resolve(
+  cultLibRoot,
+  "tests",
+  "GameCult.Caching.InteropPeer",
+  "GameCult.Caching.InteropPeer.csproj",
+);
+const csharpInteropDll = resolve(
+  cultLibRoot,
+  "bin",
+  "GameCult.Caching.InteropPeer",
+  "Debug",
+  "net10.0",
+  "GameCult.Caching.InteropPeer.dll",
+);
 
 test("CultCache supports registry bootstrap, global documents, and lookup by name and index", async () => {
   const itemDocument = defineDocumentType({
@@ -424,3 +455,248 @@ test("SingleFileMessagePackBackingStore heals legacy envelopes whose payload was
   assert.equal(records.length, 1);
   assert.ok(records[0]?.[3] instanceof Uint8Array);
 });
+
+test("CultCache v1 MessagePack stores are readable across TS, Rust, and C#", async () => {
+  await buildInteropPeers();
+  const tempDir = await mkdtemp(join(tmpdir(), "cultcache-interop-"));
+  const writers = [
+    {
+      name: "ts",
+      write: async (file: string) => writeTsInteropStore(file, "ts-writer"),
+    },
+    {
+      name: "rust",
+      write: async (file: string) => runJsonCommand("rust-write", rustInteropBinary, [
+        "write",
+        "--file", file,
+        "--runtime-id", "rust-writer",
+      ], cultcacheRsRoot),
+    },
+    {
+      name: "csharp",
+      write: async (file: string) => runJsonCommand("csharp-write", dotnetCommand, [
+        csharpInteropDll,
+        "write",
+        "--file", file,
+        "--runtime-id", "csharp-writer",
+      ], cultLibRoot),
+    },
+  ];
+  const readers = [
+    {
+      name: "ts",
+      read: async (file: string) => readTsInteropStore(file),
+    },
+    {
+      name: "rust",
+      read: async (file: string) => runJsonCommand("rust-read", rustInteropBinary, [
+        "read",
+        "--file", file,
+      ], cultcacheRsRoot),
+    },
+    {
+      name: "csharp",
+      read: async (file: string) => runJsonCommand("csharp-read", dotnetCommand, [
+        csharpInteropDll,
+        "read",
+        "--file", file,
+      ], cultLibRoot),
+    },
+  ];
+
+  for (const writer of writers) {
+    const file = join(tempDir, `${writer.name}.msgpack`);
+    const written = await writer.write(file);
+    const decoded = decode(await readFile(file)) as unknown[];
+    assert.equal(decoded[0], "cultcache.store.v1");
+    assert.ok(Array.isArray(decoded[1]), `${writer.name} did not write a schema catalog`);
+    assert.ok(Array.isArray(decoded[2]), `${writer.name} did not write records`);
+
+    for (const reader of readers) {
+      const read = await reader.read(file);
+      assert.equal(read.documentId, written.documentId, `${reader.name} failed to read ${writer.name}`);
+      assert.equal(read.authorRuntimeId, written.authorRuntimeId);
+      assert.equal(read.body, "The v1 store format is the contract.");
+      assert.ok(read.tags.includes("interop"));
+    }
+  }
+});
+
+test("CultCache interop reader accepts missing compatible trailing slots and rejects mismatched slots", async () => {
+  const tempDir = await mkdtemp(join(tmpdir(), "cultcache-interop-"));
+  const compatible = join(tempDir, "compatible.msgpack");
+  const mismatch = join(tempDir, "mismatch.msgpack");
+  await writeTsInteropStore(compatible, "legacy-writer", { legacyPayload: true });
+  assert.deepEqual(await readTsInteropStore(compatible), {
+    schemaVersion: "cultcache.interop_note.v1",
+    documentId: "note:legacy-writer",
+    authorRuntimeId: "legacy-writer",
+    title: "legacy-writer wrote a CultCache note",
+    body: "The v1 store format is the contract.",
+    tags: [],
+  });
+
+  await writeTsInteropStore(mismatch, "bad-writer", { mismatchedPayload: true });
+  await assert.rejects(
+    () => readTsInteropStore(mismatch),
+    /Expected string/u,
+  );
+});
+
+interface InteropNote {
+  schemaVersion: "cultcache.interop_note.v1";
+  documentId: string;
+  authorRuntimeId: string;
+  title: string;
+  body: string;
+  tags: string[];
+}
+
+const interopNoteDocument = defineDocumentType({
+  type: "cultcache.interop-note",
+  schemaId: "cultcache.interop-note",
+  schemaName: "cultcache.interop-note",
+  schemaVersion: "cultcache.interop_note.v1",
+  contentHash: "cultcache.interop-note",
+  canonicalSchemaJson: "{\"schemaName\":\"cultcache.interop-note\",\"schemaVersion\":\"cultcache.interop_note.v1\",\"members\":[{\"slot\":0,\"name\":\"SchemaVersion\",\"type\":\"System.String\",\"isReference\":false,\"many\":false,\"targetSchemaName\":null,\"indexAlias\":null,\"isName\":false},{\"slot\":1,\"name\":\"DocumentId\",\"type\":\"System.String\",\"isReference\":false,\"many\":false,\"targetSchemaName\":null,\"indexAlias\":null,\"isName\":true},{\"slot\":2,\"name\":\"AuthorRuntimeId\",\"type\":\"System.String\",\"isReference\":false,\"many\":false,\"targetSchemaName\":null,\"indexAlias\":null,\"isName\":false},{\"slot\":3,\"name\":\"Title\",\"type\":\"System.String\",\"isReference\":false,\"many\":false,\"targetSchemaName\":null,\"indexAlias\":null,\"isName\":false},{\"slot\":4,\"name\":\"Body\",\"type\":\"System.String\",\"isReference\":false,\"many\":false,\"targetSchemaName\":null,\"indexAlias\":null,\"isName\":false},{\"slot\":5,\"name\":\"Tags\",\"type\":\"System.String[]\",\"isReference\":false,\"many\":false,\"targetSchemaName\":null,\"indexAlias\":null,\"isName\":false}]}",
+  compatibleSchemaIds: ["cultcache.interop-note"],
+  members: [
+    { slot: 0, memberName: "SchemaVersion", typeName: "System.String" },
+    { slot: 1, memberName: "DocumentId", typeName: "System.String", isName: true },
+    { slot: 2, memberName: "AuthorRuntimeId", typeName: "System.String" },
+    { slot: 3, memberName: "Title", typeName: "System.String" },
+    { slot: 4, memberName: "Body", typeName: "System.String" },
+    { slot: 5, memberName: "Tags", typeName: "System.String[]" },
+  ],
+  schema: z.object({
+    schemaVersion: z.literal("cultcache.interop_note.v1"),
+    documentId: z.string().min(1),
+    authorRuntimeId: z.string().min(1),
+    title: z.string().min(1),
+    body: z.string().min(1),
+    tags: z.array(z.string().min(1)),
+  }),
+  formatter: {
+    encode(value: InteropNote): Uint8Array {
+      return encode([
+        value.schemaVersion,
+        value.documentId,
+        value.authorRuntimeId,
+        value.title,
+        value.body,
+        value.tags,
+      ]);
+    },
+    decode(payload: Uint8Array): InteropNote {
+      const decoded = decode(payload);
+      if (!Array.isArray(decoded) || decoded.length < 5) {
+        throw new Error("CultCache interop note payload must be a MessagePack slot array.");
+      }
+      const [schemaVersion, documentId, authorRuntimeId, title, body, tags] = decoded;
+      return interopNoteDocument.schema.parse({
+        schemaVersion,
+        documentId,
+        authorRuntimeId,
+        title,
+        body,
+        tags: Array.isArray(tags) ? tags : [],
+      });
+    },
+  },
+});
+
+async function writeTsInteropStore(
+  file: string,
+  runtimeId: string,
+  options: { legacyPayload?: boolean; mismatchedPayload?: boolean } = {},
+): Promise<InteropNote> {
+  const cache = CultCache.builder()
+    .withDocumentType(interopNoteDocument)
+    .withGenericStore(new SingleFileMessagePackBackingStore(file))
+    .build();
+  const note: InteropNote = {
+    schemaVersion: "cultcache.interop_note.v1",
+    documentId: `note:${runtimeId}`,
+    authorRuntimeId: runtimeId,
+    title: `${runtimeId} wrote a CultCache note`,
+    body: "The v1 store format is the contract.",
+    tags: [runtimeId, "ts", "interop"],
+  };
+
+  if (options.legacyPayload || options.mismatchedPayload) {
+    const payload = options.mismatchedPayload
+      ? encode([note.schemaVersion, note.documentId, 42, note.title, note.body, note.tags])
+      : encode([note.schemaVersion, note.documentId, note.authorRuntimeId, note.title, note.body]);
+    await new SingleFileMessagePackBackingStore(file).push({
+      key: note.documentId,
+      type: interopNoteDocument.type,
+      schemaId: interopNoteDocument.schemaId,
+      catalogEntry: {
+        schemaId: interopNoteDocument.schemaId!,
+        schemaName: interopNoteDocument.schemaName!,
+        schemaVersion: interopNoteDocument.schemaVersion!,
+        contentHash: interopNoteDocument.contentHash!,
+        canonicalSchemaJson: interopNoteDocument.canonicalSchemaJson!,
+        compatibleSchemaIds: [interopNoteDocument.schemaId!],
+        members: interopNoteDocument.members,
+      },
+      storedAt: new Date().toISOString(),
+      payload,
+    });
+    return note;
+  }
+
+  await cache.put(interopNoteDocument, note.documentId, note);
+  return note;
+}
+
+async function readTsInteropStore(file: string): Promise<InteropNote> {
+  const cache = CultCache.builder()
+    .withDocumentType(interopNoteDocument)
+    .withGenericStore(new SingleFileMessagePackBackingStore(file))
+    .build();
+  await cache.pullAllBackingStores();
+  const notes = cache.getAll(interopNoteDocument);
+  const note = notes[0];
+  if (!note) {
+    throw new Error("No cultcache.interop-note records found.");
+  }
+  return note;
+}
+
+async function buildInteropPeers(): Promise<void> {
+  if (!(await exists(rustInteropBinary))) {
+    await execAsync(`"${cargoCommand}" build --quiet --example cultcache_interop`, {
+      cwd: cultcacheRsRoot,
+    });
+  }
+  if (!(await exists(csharpInteropDll))) {
+    await execAsync(`"${dotnetCommand}" build "${csharpInteropProject}" -nologo`, {
+      cwd: cultLibRoot,
+    });
+  }
+}
+
+async function exists(path: string): Promise<boolean> {
+  try {
+    await access(path);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function runJsonCommand(
+  name: string,
+  command: string,
+  args: string[],
+  cwd: string,
+): Promise<any> {
+  const { stdout, stderr } = await execFileAsync(command, args, { cwd, timeout: 30_000 });
+  const trimmed = stdout.trim();
+  if (!trimmed) {
+    throw new Error(`${name} produced no stdout.\n${stderr}`);
+  }
+
+  return JSON.parse(trimmed.split(/\r?\n/).at(-1) as string);
+}

@@ -643,7 +643,7 @@ export class CultCache {
 
   #resolveDefinitionForEnvelope(entry: CultCacheEnvelope): RegisteredDefinition | undefined {
     if (entry.schemaId) {
-      return this.#schemaIdDefinitions.get(entry.schemaId);
+      return this.#schemaIdDefinitions.get(entry.schemaId) ?? this.#definitions.get(entry.type);
     }
 
     return this.#definitions.get(entry.type);
