@@ -10,6 +10,8 @@ export type {
   CultCacheDocumentFormatter,
   CultCacheDocumentIndexDefinition,
   CultCacheDocumentRegistry,
+  CultCacheSchemaCatalogEntry,
+  CultCacheSchemaCatalogMember,
   CultCacheSchema,
   CultCacheDocumentValue,
   CultCacheEnvelope,

@@ -16,12 +16,16 @@ This is not an ORM in a fake mustache. It is for cases where you want:
 - document types are registered explicitly
 - a document schema only needs a `parse(...)` function, so generated JSON-schema
   contracts can plug in directly without growing a second hand-written Zod body
-- each persisted envelope stores:
-  - `type`
+- each persisted record stores:
   - `key`
+  - `schemaId`
   - raw MessagePack `payload` bytes
   - `storedAt`
-- payload bytes only decode through the registered document definition for that `type`
+- the single-file store writes the CultCache v1 snapshot shape:
+  - `formatVersion`
+  - embedded schema catalog
+  - record array
+- payload bytes only decode through the registered document definition for that schema
 - name and index maps live in the cache, not in the backing store
 - global documents are treated as a singleton per type
 - backing stores are adapters, not the public data model
@@ -41,6 +45,9 @@ import {
 
 const itemDocument = defineDocumentType({
   type: "item",
+  schemaId: "gamecult.item.v1",
+  schemaName: "item",
+  schemaVersion: "item.v1",
   schema: z.object({
     name: z.string(),
     category: z.string(),
@@ -119,6 +126,10 @@ const settings = cache.getRequiredGlobal(settingsDocument);
 - `getGlobalEnvelope(...)`
 - `putEnvelope(...)`
 
+Document definitions may also carry persistence metadata for cross-language
+stores: `schemaId`, `schemaName`, `schemaVersion`, `contentHash`,
+`canonicalSchemaJson`, `compatibleSchemaIds`, and slot `members`.
+
 ## Name, Index, and Global Semantics
 
 `name` and `indexes` can be declared on the document definition:
@@ -194,6 +205,10 @@ formatter contract, `CultCacheTS` can now move the persisted envelope directly:
 - `putEnvelope(...)` ingests that envelope into another cache instance without
   re-encoding the payload first
 
+Raw envelopes may carry `schemaId` and catalog metadata. Domain callers should
+not need that sludge. Replication, migration tooling, and wire-compatibility
+tests do.
+
 That still is not magic shared memory. The cache decodes once so lookups and
 typed reads stay honest. But it stops doing the stupid part where identical
 MessagePack payload bytes get decoded into a generic value, then re-encoded
@@ -203,7 +218,7 @@ into the same bytes again just to cross the room.
 
 `CultCacheTS` should never deserialize arbitrary persisted payloads into arbitrary runtime shapes.
 
-It only accepts persisted envelopes whose `type` discriminator resolves to a registered document definition on the cache instance. Unknown types fail immediately. Known types decode through the registered formatter and schema for that type only.
+It only accepts persisted records whose `schemaId` or legacy `type` discriminator resolves to a registered document definition on the cache instance. Unknown schemas fail immediately. Known schemas decode through the registered formatter and schema only.
 
 That is the TypeScript version of the original CultCache trick:
 
@@ -216,8 +231,12 @@ That is the TypeScript version of the original CultCache trick:
 
 `SingleFileMessagePackBackingStore` is the first concrete store.
 
-- it writes atomic snapshots
+- it writes atomic CultCache v1 MessagePack snapshots
+- the top-level MessagePack value is `[formatVersion, schemaCatalog, records]`
+- each record is `[key, schemaId, storedAt, payload]`
+- each catalog entry is `[schemaId, schemaName, schemaVersion, contentHash, canonicalSchemaJson, compatibleSchemaIds, members]`
+- it still reads the older TS/Rust-style envelope array and rewrites repaired legacy payloads as v1 snapshots
 - it queues local writes so one process does not step on its own shoelaces
-- it persists raw MessagePack payload bytes inside MessagePack envelopes
+- it persists raw MessagePack payload bytes inside schema-addressed records
 
 It is a control-plane store, not a tiny god. If multiple processes hammer the same file, you still need a coordinator or an external lock instead of prayer.

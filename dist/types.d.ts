@@ -9,6 +9,25 @@ export interface CultCacheDocumentFormatter<TValue> {
     encode(value: TValue): Uint8Array;
     decode(payload: Uint8Array): TValue;
 }
+export interface CultCacheSchemaCatalogMember {
+    slot: number;
+    memberName: string;
+    typeName: string;
+    isReference?: boolean;
+    isMany?: boolean;
+    targetSchemaName?: string | null;
+    isName?: boolean;
+    indexAlias?: string | null;
+}
+export interface CultCacheSchemaCatalogEntry {
+    schemaId: string;
+    schemaName: string;
+    schemaVersion: string;
+    contentHash: string;
+    canonicalSchemaJson: string;
+    compatibleSchemaIds?: readonly string[];
+    members?: readonly CultCacheSchemaCatalogMember[];
+}
 export interface CultCacheDocumentIndexDefinition<TValue> {
     name: string;
     accessor: CultCacheDocumentAccessor<TValue>;
@@ -16,7 +35,13 @@ export interface CultCacheDocumentIndexDefinition<TValue> {
 export interface CultCacheDocumentDefinition<TSchema extends CultCacheSchema = CultCacheSchema> {
     type: string;
     schema: TSchema;
+    schemaId?: string;
     schemaName?: string;
+    schemaVersion?: string;
+    contentHash?: string;
+    canonicalSchemaJson?: string;
+    compatibleSchemaIds?: readonly string[];
+    members?: readonly CultCacheSchemaCatalogMember[];
     global?: boolean;
     name?: CultCacheDocumentAccessor<InferCultCacheSchemaValue<TSchema>>;
     indexes?: Readonly<Record<string, CultCacheDocumentAccessor<InferCultCacheSchemaValue<TSchema>>>> | readonly CultCacheDocumentIndexDefinition<InferCultCacheSchemaValue<TSchema>>[];
@@ -32,6 +57,8 @@ export interface CultCacheEnvelope {
     type: string;
     payload: Uint8Array;
     storedAt: string;
+    schemaId?: string;
+    catalogEntry?: CultCacheSchemaCatalogEntry;
 }
 export interface PushAllOptions {
     soft?: boolean;

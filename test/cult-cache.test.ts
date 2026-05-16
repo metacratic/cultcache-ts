@@ -271,6 +271,118 @@ test("CultCache can ingest raw envelopes without re-encoding the payload", async
   assert.deepEqual(target.getRequiredEnvelope(noteDocument, "note:hello").payload, envelope.payload);
 });
 
+test("SingleFileMessagePackBackingStore writes the CultCache v1 snapshot shape", async () => {
+  const namedDocument = defineDocumentType({
+    type: "tests.named_entry",
+    schema: z.object({
+      Name: z.string(),
+      Value: z.string(),
+    }),
+    schemaId: "sha256:e7b97801b94190f3159012ede45b0069bb09ebf7920f7432c971bc86a0e08de8",
+    schemaName: "tests.named_entry",
+    schemaVersion: "tests.named_entry.v1",
+    contentHash: "sha256:23150930afcc1d84f0cb3012ccc2debcb9b4685f62083033bbaab0083f1e832e",
+    canonicalSchemaJson: "{\"schemaName\":\"tests.named_entry\",\"schemaVersion\":\"tests.named_entry.v1\",\"members\":[{\"slot\":0,\"name\":\"Name\",\"type\":\"System.String\",\"isReference\":false,\"many\":false,\"targetSchemaName\":null,\"indexAlias\":null,\"isName\":true},{\"slot\":1,\"name\":\"Value\",\"type\":\"System.String\",\"isReference\":false,\"many\":false,\"targetSchemaName\":null,\"indexAlias\":null,\"isName\":false}]}",
+    members: [
+      {
+        slot: 0,
+        memberName: "Name",
+        typeName: "System.String",
+        isName: true,
+      },
+      {
+        slot: 1,
+        memberName: "Value",
+        typeName: "System.String",
+      },
+    ],
+    name: "Name",
+  });
+
+  const storePath = join(await mkdtemp(join(tmpdir(), "cultcache-ts-")), "snapshot.msgpack");
+  const cache = CultCache.builder()
+    .withDocumentType(namedDocument)
+    .withGenericStore(new SingleFileMessagePackBackingStore(storePath))
+    .build();
+
+  await cache.put(namedDocument, "record-1", {
+    Name: "Teeth",
+    Value: "slot-array",
+  });
+
+  const snapshot = decode(await readFile(storePath)) as unknown[];
+  assert.equal(snapshot[0], "cultcache.store.v1");
+
+  const catalog = snapshot[1] as unknown[][];
+  assert.equal(catalog.length, 1);
+  assert.equal(catalog[0]?.[0], "sha256:e7b97801b94190f3159012ede45b0069bb09ebf7920f7432c971bc86a0e08de8");
+  assert.equal(catalog[0]?.[1], "tests.named_entry");
+  assert.equal(catalog[0]?.[2], "tests.named_entry.v1");
+
+  const records = snapshot[2] as unknown[][];
+  assert.equal(records.length, 1);
+  assert.equal(records[0]?.[0], "record-1");
+  assert.equal(records[0]?.[1], "sha256:e7b97801b94190f3159012ede45b0069bb09ebf7920f7432c971bc86a0e08de8");
+  assert.ok(records[0]?.[3] instanceof Uint8Array);
+});
+
+test("SingleFileMessagePackBackingStore reads CultCache v1 snapshots by schema id", async () => {
+  const noteDocument = defineDocumentType({
+    type: "tests.named_entry",
+    schema: z.object({
+      Name: z.string(),
+      Value: z.string(),
+    }),
+    schemaId: "schema-1",
+    schemaName: "tests.named_entry",
+    schemaVersion: "tests.named_entry.v1",
+    contentHash: "hash-1",
+    canonicalSchemaJson: "{\"fields\":2}",
+  });
+
+  const storePath = join(await mkdtemp(join(tmpdir(), "cultcache-ts-")), "csharp.msgpack");
+  await writeFile(
+    storePath,
+    encode([
+      "cultcache.store.v1",
+      [
+        [
+          "schema-1",
+          "tests.named_entry",
+          "tests.named_entry.v1",
+          "hash-1",
+          "{\"fields\":2}",
+          ["schema-1"],
+          [],
+        ],
+      ],
+      [
+        [
+          "record-1",
+          "schema-1",
+          "2026-05-08T12:00:00Z",
+          encode({
+            Name: "Teeth",
+            Value: "slot-array",
+          }),
+        ],
+      ],
+    ]),
+  );
+
+  const cache = CultCache.builder()
+    .withDocumentType(noteDocument)
+    .withGenericStore(new SingleFileMessagePackBackingStore(storePath))
+    .build();
+
+  await cache.pullAllBackingStores();
+  assert.deepEqual(cache.getRequired(noteDocument, "record-1"), {
+    Name: "Teeth",
+    Value: "slot-array",
+  });
+  assert.equal(cache.getRequiredEnvelope(noteDocument, "record-1").schemaId, "schema-1");
+});
+
 test("SingleFileMessagePackBackingStore heals legacy envelopes whose payload was persisted as an object", async () => {
   const noteDocument = defineDocumentType({
     type: "note",
@@ -306,7 +418,9 @@ test("SingleFileMessagePackBackingStore heals legacy envelopes whose payload was
   await cache.pullAllBackingStores();
   assert.deepEqual(cache.getRequired(noteDocument, "note:hello"), envelopePayload);
 
-  const rewritten = decode(await readFile(storePath)) as Array<{ payload: unknown }>;
-  assert.equal(rewritten.length, 1);
-  assert.ok(rewritten[0]?.payload instanceof Uint8Array);
+  const rewritten = decode(await readFile(storePath)) as unknown[];
+  assert.equal(rewritten[0], "cultcache.store.v1");
+  const records = rewritten[2] as unknown[][];
+  assert.equal(records.length, 1);
+  assert.ok(records[0]?.[3] instanceof Uint8Array);
 });

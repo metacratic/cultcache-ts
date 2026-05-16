@@ -9,6 +9,7 @@ import type {
   CultCacheDocumentRegistry,
   CultCacheDocumentValue,
   CultCacheEnvelope,
+  CultCacheSchemaCatalogEntry,
   CultCacheStoreRegistration,
 } from "./types";
 
@@ -21,6 +22,7 @@ type RegisteredDefinition = {
   readonly definition: AnyCultCacheDocumentDefinition;
   readonly global: boolean;
   readonly formatter: CultCacheDocumentFormatter<unknown>;
+  readonly catalogEntry: CultCacheSchemaCatalogEntry;
   nameAccessor?: (value: unknown) => string | undefined;
   readonly indexAccessors: Map<string, (value: unknown) => string | undefined>;
 };
@@ -71,6 +73,7 @@ export class CultCache {
   static readonly GLOBAL_KEY = "__global__";
 
   readonly #definitions = new Map<string, RegisteredDefinition>();
+  readonly #schemaIdDefinitions = new Map<string, RegisteredDefinition>();
   readonly #entries = new Map<string, HydratedEntry>();
   readonly #typeEntryIds = new Map<string, Set<string>>();
   readonly #nameToKeyMaps = new Map<string, Map<string, string>>();
@@ -94,6 +97,7 @@ export class CultCache {
       definition,
       global: definition.global === true,
       formatter: this.#createFormatter(definition),
+      catalogEntry: this.#createCatalogEntry(definition),
       nameAccessor: undefined,
       indexAccessors: new Map<string, (value: unknown) => string | undefined>(),
     };
@@ -110,6 +114,13 @@ export class CultCache {
     }
 
     this.#definitions.set(definition.type, registered);
+    for (const schemaId of registered.catalogEntry.compatibleSchemaIds ?? [registered.catalogEntry.schemaId]) {
+      const existingBySchema = this.#schemaIdDefinitions.get(schemaId);
+      if (existingBySchema && existingBySchema !== registered) {
+        throw new Error(`CultCache schema id "${schemaId}" is already registered for type "${existingBySchema.definition.type}".`);
+      }
+      this.#schemaIdDefinitions.set(schemaId, registered);
+    }
     this.#rebuildDefinitionLookups(registered);
     return definition;
   }
@@ -179,9 +190,13 @@ export class CultCache {
       const entries = await registration.store.pullAll();
 
       for (const entry of entries) {
-        const registered = this.#definitions.get(entry.type);
+        const registered = this.#resolveDefinitionForEnvelope(entry);
         if (!registered) {
-          throw new Error(`No schema is registered for persisted document type "${entry.type}".`);
+          throw new Error(
+            entry.schemaId
+              ? `No schema is registered for persisted schema id "${entry.schemaId}".`
+              : `No schema is registered for persisted document type "${entry.type}".`,
+          );
         }
 
         const payload = this.#cloneBytes(entry.payload);
@@ -358,6 +373,8 @@ export class CultCache {
       type: definition.type,
       payload: this.#cloneBytes(payload),
       storedAt: new Date().toISOString(),
+      schemaId: registered.catalogEntry.schemaId,
+      catalogEntry: registered.catalogEntry,
     };
 
     const route = this.#resolveRoute(definition.type);
@@ -402,6 +419,8 @@ export class CultCache {
       type: envelope.type,
       payload,
       storedAt: envelope.storedAt,
+      schemaId: envelope.schemaId ?? registered.catalogEntry.schemaId,
+      catalogEntry: envelope.catalogEntry ?? registered.catalogEntry,
     };
 
     const route = this.#resolveRoute(definition.type);
@@ -511,6 +530,52 @@ export class CultCache {
     };
   }
 
+  #createCatalogEntry(definition: AnyCultCacheDocumentDefinition): CultCacheSchemaCatalogEntry {
+    const schemaName = definition.schemaName ?? definition.type;
+    const schemaVersion = definition.schemaVersion ?? `${schemaName}.v1`;
+    const canonicalSchemaJson = definition.canonicalSchemaJson ?? JSON.stringify({
+      schemaName,
+      schemaVersion,
+      members: [...(definition.members ?? [])]
+        .sort((left, right) => left.slot - right.slot)
+        .map((member) => ({
+          slot: member.slot,
+          name: member.memberName,
+          type: member.typeName,
+          isReference: member.isReference === true,
+          many: member.isMany === true,
+          targetSchemaName: member.targetSchemaName ?? null,
+          indexAlias: member.indexAlias ?? null,
+          isName: member.isName === true,
+        })),
+    });
+    const schemaId = definition.schemaId ?? schemaName;
+    const compatibleSchemaIds = [
+      ...new Set([schemaId, ...(definition.compatibleSchemaIds ?? [])]),
+    ];
+
+    return {
+      schemaId,
+      schemaName,
+      schemaVersion,
+      contentHash: definition.contentHash ?? schemaId,
+      canonicalSchemaJson,
+      compatibleSchemaIds,
+      members: [...(definition.members ?? [])]
+        .sort((left, right) => left.slot - right.slot)
+        .map((member) => ({
+          slot: member.slot,
+          memberName: member.memberName,
+          typeName: member.typeName,
+          isReference: member.isReference === true,
+          isMany: member.isMany === true,
+          targetSchemaName: member.targetSchemaName ?? null,
+          isName: member.isName === true,
+          indexAlias: member.indexAlias ?? null,
+        })),
+    };
+  }
+
   #enumerateDefinitionIndexes(
     definition: AnyCultCacheDocumentDefinition,
   ): Array<[string, AccessorInput]> {
@@ -576,6 +641,14 @@ export class CultCache {
     return registered;
   }
 
+  #resolveDefinitionForEnvelope(entry: CultCacheEnvelope): RegisteredDefinition | undefined {
+    if (entry.schemaId) {
+      return this.#schemaIdDefinitions.get(entry.schemaId);
+    }
+
+    return this.#definitions.get(entry.type);
+  }
+
   #resolveRoute(type: string): StoreRoute {
     const typeSpecific = this.#stores.filter((registration) => registration.types.includes(type));
     if (typeSpecific.length > 0) {
@@ -618,6 +691,8 @@ export class CultCache {
     const hydrated: HydratedEntry = {
       ...entry,
       payload: this.#cloneBytes(entry.payload),
+      schemaId: entry.schemaId ?? registered.catalogEntry.schemaId,
+      catalogEntry: entry.catalogEntry ?? registered.catalogEntry,
       value,
     };
     this.#entries.set(entryId, hydrated);
@@ -769,6 +844,8 @@ export class CultCache {
       type: entry.type,
       payload: this.#cloneBytes(entry.payload),
       storedAt: entry.storedAt,
+      schemaId: entry.schemaId,
+      catalogEntry: entry.catalogEntry,
     };
   }
 
