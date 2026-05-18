@@ -26,6 +26,23 @@ type GraphProjection = {
 
 const MAX_EXPANDED_VALUE_NODES = 320;
 const assetPath = (name: string) => `${import.meta.env.BASE_URL}${name}`;
+const HUGINN_ART = {
+  ground: assetPath("huginn-groundtruth-alpha.png"),
+  curvature: assetPath("huginn-curvature.png"),
+  flow: assetPath("huginn-flow.png"),
+  normal: assetPath("huginn-normal.png"),
+};
+
+function HuginnField() {
+  return (
+    <HuginnFieldCanvas
+      imageUrl={HUGINN_ART.ground}
+      curvatureUrl={HUGINN_ART.curvature}
+      flowUrl={HUGINN_ART.flow}
+      normalUrl={HUGINN_ART.normal}
+    />
+  );
+}
 
 const app = document.querySelector<HTMLDivElement>("#app");
 if (!app) {
@@ -156,7 +173,7 @@ function EmptyWorkspace({
 }) {
   return (
     <section className="empty-workspace">
-      <HuginnFieldCanvas imageUrl={assetPath("hugin.png")} />
+      <HuginnField />
       <section className="floating-panel brand-panel is-primary">
         <BrandBlock />
         <FilePicker onInspectFile={onInspectFile} />
@@ -233,7 +250,7 @@ function Metric({ label, value }: { label: string; value: string }) {
 function NoFile() {
   return (
     <div className="hero">
-      <img src={assetPath("hugin.png")} alt="" />
+      <img src={HUGINN_ART.ground} alt="" />
       <h2>No state loaded</h2>
       <p>Drag a CultCache <code>.cc</code> store into the window to inspect the snapshot header, schema catalog, records, and decoded MessagePack payloads.</p>
     </div>
@@ -323,7 +340,7 @@ function InspectionView({
           selection={graphSelection}
           onSelectionChange={selectGraph}
           title="CultCache Structure"
-          viewportBackdrop={<HuginnFieldCanvas imageUrl={assetPath("hugin.png")} />}
+          viewportBackdrop={<HuginnField />}
           viewportBackground="#03070a"
           overlayPanels
           showSidebar={false}

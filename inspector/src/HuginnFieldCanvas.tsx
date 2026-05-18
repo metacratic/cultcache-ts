@@ -20,6 +20,11 @@ type FieldSample = {
   rgba: Uint8ClampedArray;
   luma: Float32Array;
   alpha: Float32Array;
+  analysis: Float32Array;
+  flowX: Float32Array;
+  flowY: Float32Array;
+  normalX: Float32Array;
+  normalY: Float32Array;
 };
 
 type PyramidLevel = {
@@ -32,12 +37,19 @@ type PyramidLevel = {
   curve: Float32Array;
 };
 
-const FIELD_SIZE = 64;
+const FIELD_SIZE = 256;
 const MAX_DEPTH = 6;
-const MIN_BRUSH_SIZE = 2;
-const ENERGY_SPLIT_THRESHOLD = 0.045;
+const MIN_BRUSH_SIZE = 4;
+const ENERGY_SPLIT_THRESHOLD = 0.038;
 
-export function HuginnFieldCanvas({ imageUrl }: { imageUrl: string }) {
+type HuginnFieldCanvasProps = {
+  imageUrl: string;
+  curvatureUrl?: string;
+  flowUrl?: string;
+  normalUrl?: string;
+};
+
+export function HuginnFieldCanvas({ imageUrl, curvatureUrl, flowUrl, normalUrl }: HuginnFieldCanvasProps) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
 
   useEffect(() => {
@@ -47,28 +59,29 @@ export function HuginnFieldCanvas({ imageUrl }: { imageUrl: string }) {
     }
 
     let cancelled = false;
-    const image = new Image();
-    image.decoding = "async";
-    image.src = imageUrl;
-
     const render = async () => {
       try {
-        await image.decode();
+        const [image, curvatureImage, flowImage, normalImage] = await Promise.all([
+          loadImage(imageUrl),
+          curvatureUrl ? loadImage(curvatureUrl) : Promise.resolve(undefined),
+          flowUrl ? loadImage(flowUrl) : Promise.resolve(undefined),
+          normalUrl ? loadImage(normalUrl) : Promise.resolve(undefined),
+        ]);
+        if (cancelled) {
+          return;
+        }
+
+        const sample = sampleImage(image, curvatureImage, flowImage, normalImage);
+        const pyramid = buildCurvaturePyramid(sample);
+        const brushes = buildBrushes(sample, pyramid);
+        const observer = new ResizeObserver(() => drawField(canvas, brushes, sample));
+        observer.observe(canvas);
+        drawField(canvas, brushes, sample);
+
+        return () => observer.disconnect();
       } catch {
         return;
       }
-      if (cancelled) {
-        return;
-      }
-
-      const sample = sampleImage(image);
-      const pyramid = buildCurvaturePyramid(sample);
-      const brushes = buildBrushes(sample, pyramid);
-      const observer = new ResizeObserver(() => drawField(canvas, brushes, sample));
-      observer.observe(canvas);
-      drawField(canvas, brushes, sample);
-
-      return () => observer.disconnect();
     };
 
     let cleanup: (() => void) | undefined;
@@ -80,12 +93,56 @@ export function HuginnFieldCanvas({ imageUrl }: { imageUrl: string }) {
       cancelled = true;
       cleanup?.();
     };
-  }, [imageUrl]);
+  }, [curvatureUrl, flowUrl, imageUrl, normalUrl]);
 
   return <canvas ref={canvasRef} className="huginn-field-canvas" aria-hidden="true" />;
 }
 
-function sampleImage(image: HTMLImageElement): FieldSample {
+function loadImage(url: string): Promise<HTMLImageElement> {
+  const image = new Image();
+  image.decoding = "async";
+  image.src = url;
+  return image.decode()
+    .catch(() => new Promise<void>((resolve, reject) => {
+      if (image.complete && image.naturalWidth > 0) {
+        resolve();
+        return;
+      }
+      image.onload = () => resolve();
+      image.onerror = () => reject(new Error(`Could not load ${url}`));
+    }))
+    .then(() => image);
+}
+
+function sampleImage(
+  image: HTMLImageElement,
+  curvatureImage?: HTMLImageElement,
+  flowImage?: HTMLImageElement,
+  normalImage?: HTMLImageElement,
+): FieldSample {
+  const base = sampleBitmap(image);
+  const curvature = curvatureImage ? sampleBitmap(curvatureImage) : undefined;
+  const flow = flowImage ? sampleBitmap(flowImage) : undefined;
+  const normal = normalImage ? sampleBitmap(normalImage) : undefined;
+  const analysis = curvature?.luma ?? base.luma;
+  const flowVectors = flow ? buildFlowVectors(flow) : emptyVectors();
+  const normalVectors = normal ? buildNormalVectors(normal) : emptyVectors();
+
+  return {
+    width: FIELD_SIZE,
+    height: FIELD_SIZE,
+    rgba: base.rgba,
+    luma: base.luma,
+    alpha: base.alpha,
+    analysis,
+    flowX: flowVectors.x,
+    flowY: flowVectors.y,
+    normalX: normalVectors.x,
+    normalY: normalVectors.y,
+  };
+}
+
+function sampleBitmap(image: HTMLImageElement) {
   const canvas = document.createElement("canvas");
   canvas.width = FIELD_SIZE;
   canvas.height = FIELD_SIZE;
@@ -95,7 +152,8 @@ function sampleImage(image: HTMLImageElement): FieldSample {
   }
 
   context.clearRect(0, 0, FIELD_SIZE, FIELD_SIZE);
-  context.imageSmoothingEnabled = false;
+  context.imageSmoothingEnabled = true;
+  context.imageSmoothingQuality = "high";
   context.drawImage(image, 0, 0, FIELD_SIZE, FIELD_SIZE);
   const rgba = context.getImageData(0, 0, FIELD_SIZE, FIELD_SIZE).data;
   const luma = new Float32Array(FIELD_SIZE * FIELD_SIZE);
@@ -111,14 +169,53 @@ function sampleImage(image: HTMLImageElement): FieldSample {
     ) / 255 * a;
   }
 
-  return { width: FIELD_SIZE, height: FIELD_SIZE, rgba, luma, alpha };
+  return { rgba, luma, alpha };
+}
+
+function emptyVectors() {
+  return {
+    x: new Float32Array(FIELD_SIZE * FIELD_SIZE),
+    y: new Float32Array(FIELD_SIZE * FIELD_SIZE),
+  };
+}
+
+function buildFlowVectors(flow: { luma: Float32Array }) {
+  const x = new Float32Array(FIELD_SIZE * FIELD_SIZE);
+  const y = new Float32Array(FIELD_SIZE * FIELD_SIZE);
+  for (let yy = 0; yy < FIELD_SIZE; yy += 1) {
+    for (let xx = 0; xx < FIELD_SIZE; xx += 1) {
+      const left = scalarAt(flow.luma, FIELD_SIZE, FIELD_SIZE, xx - 1, yy);
+      const right = scalarAt(flow.luma, FIELD_SIZE, FIELD_SIZE, xx + 1, yy);
+      const up = scalarAt(flow.luma, FIELD_SIZE, FIELD_SIZE, xx, yy - 1);
+      const down = scalarAt(flow.luma, FIELD_SIZE, FIELD_SIZE, xx, yy + 1);
+      const dx = (right - left) * 0.5;
+      const dy = (down - up) * 0.5;
+      const length = Math.max(0.0001, Math.hypot(dx, dy));
+      const index = yy * FIELD_SIZE + xx;
+      x[index] = -dy / length;
+      y[index] = dx / length;
+    }
+  }
+  return { x, y };
+}
+
+function buildNormalVectors(normal: { rgba: Uint8ClampedArray; alpha: Float32Array }) {
+  const x = new Float32Array(FIELD_SIZE * FIELD_SIZE);
+  const y = new Float32Array(FIELD_SIZE * FIELD_SIZE);
+  for (let index = 0; index < x.length; index += 1) {
+    const source = index * 4;
+    const alpha = normal.alpha[index];
+    x[index] = (normal.rgba[source] / 255 * 2 - 1) * alpha;
+    y[index] = (normal.rgba[source + 1] / 255 * 2 - 1) * alpha;
+  }
+  return { x, y };
 }
 
 function buildCurvaturePyramid(sample: FieldSample): PyramidLevel[] {
   const levels: PyramidLevel[] = [];
   let width = sample.width;
   let height = sample.height;
-  let values = sample.luma;
+  let values = sample.analysis;
 
   for (let level = 0; level < 5; level += 1) {
     const gx = new Float32Array(width * height);
@@ -193,7 +290,7 @@ function splitCell(
     return;
   }
 
-  const field = sampleVector(pyramid, x + size * 0.5, y + size * 0.5, depth);
+  const field = sampleVector(sample, pyramid, x + size * 0.5, y + size * 0.5, depth);
   brushes.push({
     x: (x + size * 0.5) / sample.width,
     y: (y + size * 0.5) / sample.height,
@@ -345,14 +442,21 @@ function cellStats(sample: FieldSample, level: PyramidLevel, x: number, y: numbe
   };
 }
 
-function sampleVector(pyramid: PyramidLevel[], x: number, y: number, depth: number) {
+function sampleVector(sample: FieldSample, pyramid: PyramidLevel[], x: number, y: number, depth: number) {
   const level = pyramid[Math.min(pyramid.length - 1, Math.max(0, Math.floor(depth / 2)))] ?? pyramid[0];
   const sx = Math.max(0, Math.min(level.width - 1, Math.floor(x / FIELD_SIZE * level.width)));
   const sy = Math.max(0, Math.min(level.height - 1, Math.floor(y / FIELD_SIZE * level.height)));
   const index = sy * level.width + sx;
+  const sourceX = Math.max(0, Math.min(sample.width - 1, Math.floor(x)));
+  const sourceY = Math.max(0, Math.min(sample.height - 1, Math.floor(y)));
+  const sourceIndex = sourceY * sample.width + sourceX;
+  const flowX = sample.flowX[sourceIndex] ?? 0;
+  const flowY = sample.flowY[sourceIndex] ?? 0;
+  const normalX = sample.normalX[sourceIndex] ?? 0;
+  const normalY = sample.normalY[sourceIndex] ?? 0;
   return {
-    gx: level.gx[index] * 90,
-    gy: level.gy[index] * 90,
+    gx: level.gx[index] * 54 + flowX * 0.28 + normalX * 0.18,
+    gy: level.gy[index] * 54 + flowY * 0.28 + normalY * 0.18,
     curve: level.curve[index],
   };
 }
