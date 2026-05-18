@@ -32,7 +32,7 @@ This is not an ORM in a fake mustache. It is for cases where you want:
 
 That keeps the polymorphic boundary tight without making callers write boilerplate by candlelight.
 
-## Inspector
+## Hugin Inspector
 
 CultCache files may use the `.cc` extension. The bytes are still the canonical
 `cultcache.store.v1` MessagePack snapshot; the extension is the human handle, not
@@ -50,15 +50,15 @@ Build the Vite inspector bundle:
 npm run build:inspector
 ```
 
-Build a desktop package:
+Build the desktop package:
 
 ```sh
 npm run dist:inspector
 ```
 
-The inspector is read-only. Drop a `.cc`, `.msgpack`, or `.mpack` file onto the
-window to inspect the snapshot header, schema catalog, records, and decoded
-MessagePack payload previews without registering application schemas.
+Hugin is read-only. Drop a `.cc`, `.msgpack`, or `.mpack` file onto the window to
+inspect the snapshot header, schema catalog, records, and decoded MessagePack
+payload previews without registering application schemas.
 
 ## Example
 

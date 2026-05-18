@@ -46,8 +46,11 @@ function render(): void {
     <main class="workspace ${dragging ? "is-dragging" : ""}">
       <section class="sidebar">
         <div class="brand">
-          <h1>CultCache Inspector</h1>
-          <p>Drop a <code>.cc</code> file and read the wire format without registering app schemas.</p>
+          <img src="/hugin-64.png" alt="" width="64" height="64" />
+          <div>
+            <h1>Hugin</h1>
+            <p>CultCache state inspection for <code>.cc</code> files.</p>
+          </div>
         </div>
         <label class="dropzone">
           <input id="file-input" type="file" accept=".cc,.msgpack,.mpack,application/octet-stream" />
@@ -124,8 +127,9 @@ function renderEmptyState(): string {
 function renderNoFile(): string {
   return `
     <div class="hero">
-      <h2>No file loaded</h2>
-      <p>Drag a CultCache <code>.cc</code> store into the window. The inspector shows the snapshot header, schema catalog, records, and decoded payload slot arrays.</p>
+      <img src="/hugin.png" alt="" />
+      <h2>No state loaded</h2>
+      <p>Drag a CultCache <code>.cc</code> store into the window to inspect the snapshot header, schema catalog, records, and decoded MessagePack payloads.</p>
     </div>
   `;
 }

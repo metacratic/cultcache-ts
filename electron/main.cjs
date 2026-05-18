@@ -9,8 +9,9 @@ function createWindow() {
     height: 780,
     minWidth: 820,
     minHeight: 560,
-    title: "CultCache Inspector",
-    backgroundColor: "#f4f2ea",
+    title: "Hugin",
+    icon: path.join(__dirname, "..", "dist-inspector", "hugin-64.png"),
+    backgroundColor: "#05090d",
     autoHideMenuBar: true,
     webPreferences: {
       contextIsolation: true,
