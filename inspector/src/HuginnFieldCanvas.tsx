@@ -102,6 +102,7 @@ struct SimUniforms {
 @group(0) @binding(2) var fieldSampler: sampler;
 @group(0) @binding(3) var fieldTexture: texture_2d<f32>;
 @group(0) @binding(4) var<storage, read> nodeEnvelopes: array<vec4f>;
+@group(0) @binding(5) var albedoTexture: texture_2d<f32>;
 
 fn hash(value: f32) -> f32 {
   return fract(sin(value * 12.9898) * 43758.5453);
@@ -168,6 +169,10 @@ fn proceduralCurl(point: vec2f, seed: f32) -> vec2f {
 
 fn samplePacked(uv: vec2f) -> vec4f {
   return textureSampleLevel(fieldTexture, fieldSampler, clamp(uv, vec2f(0.001), vec2f(0.999)), 0.0);
+}
+
+fn sampleAlbedo(uv: vec2f) -> vec4f {
+  return textureSampleLevel(albedoTexture, fieldSampler, clamp(uv, vec2f(0.001), vec2f(0.999)), 0.0);
 }
 
 fn channelGradient(uv: vec2f, channel: u32) -> vec2f {
@@ -271,10 +276,13 @@ fn updateParticles(@builtin(global_invocation_id) id: vec3u) {
   let flowAxis = abs(fieldVector.x - fieldVector.y);
   let heat = clamp(packed.a * 0.78 + packed.b * 0.62 + nodeHeat * 0.38 + fade * 0.18, 0.0, 1.0);
   let brass = clamp((packed.b - packed.a * 0.32) * 1.35 + flowAxis * 0.18, 0.0, 1.0);
+  let albedo = sampleAlbedo(uv);
   let cyan = vec3f(0.08 + heat * 0.28, 0.44 + heat * 0.46, 0.52 + heat * 0.62);
   let gold = vec3f(0.86, 0.58, 0.22);
   let deep = vec3f(0.02, 0.10, 0.12);
-  let rgb = mix(mix(deep, cyan, 0.42 + heat * 0.58), gold, brass * 0.32);
+  let albedoLift = mix(deep, albedo.rgb, clamp(albedo.a * (0.72 + heat * 0.24), 0.0, 1.0));
+  let fieldTint = mix(cyan, gold, brass * 0.26);
+  let rgb = mix(albedoLift, fieldTint, 0.18 + heat * 0.16);
   particle.color = vec4f(
     rgb,
     uniforms.alpha * (0.0022 + heat * 0.008 + packed.a * 0.005 + nodeHeat * 0.0025) * fade * (0.72 + levelDetail * 0.28)
@@ -627,9 +635,20 @@ async function startGpuParticleField(canvas: HTMLCanvasElement, sample: FieldSam
     format: "rgba8unorm",
     usage: 1 | 2 | 4,
   });
+  const albedoTexture = device.createTexture({
+    size: [sample.width, sample.height, 1],
+    format: "rgba8unorm",
+    usage: 1 | 2 | 4,
+  });
   device.queue.writeTexture(
     { texture: fieldTexture },
     sample.fieldRgba,
+    { bytesPerRow: sample.width * 4, rowsPerImage: sample.height },
+    { width: sample.width, height: sample.height, depthOrArrayLayers: 1 },
+  );
+  device.queue.writeTexture(
+    { texture: albedoTexture },
+    sample.rgba,
     { bytesPerRow: sample.width * 4, rowsPerImage: sample.height },
     { width: sample.width, height: sample.height, depthOrArrayLayers: 1 },
   );
@@ -686,6 +705,7 @@ async function startGpuParticleField(canvas: HTMLCanvasElement, sample: FieldSam
       { binding: 2, resource: sampler },
       { binding: 3, resource: fieldTexture.createView() },
       { binding: 4, resource: { buffer: nodeEnvelopeBuffer } },
+      { binding: 5, resource: albedoTexture.createView() },
     ],
   });
   const renderBindGroup = device.createBindGroup({
@@ -786,6 +806,7 @@ async function startGpuParticleField(canvas: HTMLCanvasElement, sample: FieldSam
     uniformBuffer.destroy();
     nodeEnvelopeBuffer.destroy();
     fieldTexture.destroy();
+    albedoTexture.destroy();
   };
 }
 
