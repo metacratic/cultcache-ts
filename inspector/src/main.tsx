@@ -1,6 +1,6 @@
 import { EpiphanyGraphViewer, type EpiphanyGraphEdge, type EpiphanyGraphNode, type EpiphanyGraphsState, type ViewerSelection } from "@epiphanygraph/epiphany-graph-viewer";
 import { createRoot } from "react-dom/client";
-import { useMemo, useState, type DragEvent } from "react";
+import { Component, useMemo, useState, type DragEvent, type ReactNode } from "react";
 
 import { inspectCultCacheBytes, type CultCacheInspection, type InspectedCatalogEntry, type InspectedRecord } from "../../src/cult-cache-inspector";
 import "./styles.css";
@@ -20,14 +20,55 @@ type GraphProjection = {
   catalogNodeIds: string[];
   nodeSelections: Map<string, RawSelection>;
   edgeSelections: Map<string, RawSelection>;
+  truncatedValueNodes: number;
 };
+
+const MAX_EXPANDED_VALUE_NODES = 320;
 
 const app = document.querySelector<HTMLDivElement>("#app");
 if (!app) {
   throw new Error("Missing inspector app root.");
 }
 
-createRoot(app).render(<HuginApp />);
+createRoot(app).render(
+  <RenderCrashBoundary>
+    <HuginApp />
+  </RenderCrashBoundary>,
+);
+
+class RenderCrashBoundary extends Component<{ children: ReactNode }, { error: string | null }> {
+  state = { error: null };
+
+  static getDerivedStateFromError(error: unknown): { error: string } {
+    return { error: error instanceof Error ? error.message : String(error) };
+  }
+
+  render(): ReactNode {
+    if (this.state.error) {
+      return (
+        <main className="workspace">
+          <section className="sidebar">
+            <div className="brand">
+              <img src="/hugin-64.png" alt="" width="64" height="64" />
+              <div>
+                <h1>Hugin</h1>
+                <p>CultCache state inspection for <code>.cc</code> files.</p>
+              </div>
+            </div>
+          </section>
+          <section className="content">
+            <div className="error fatal-error">
+              <strong>Renderer error</strong>
+              <span>{this.state.error}</span>
+            </div>
+          </section>
+        </main>
+      );
+    }
+
+    return this.props.children;
+  }
+}
 
 function HuginApp() {
   const [inspection, setInspection] = useState<CultCacheInspection | undefined>();
@@ -37,8 +78,8 @@ function HuginApp() {
   const [dragging, setDragging] = useState(false);
 
   const graphProjection = useMemo(
-    () => inspection ? buildGraphProjection(inspection) : emptyGraphProjection(),
-    [inspection],
+    () => inspection ? buildGraphProjection(inspection, selection.record) : emptyGraphProjection(),
+    [inspection, selection.record],
   );
 
   async function inspectFile(file: File): Promise<void> {
@@ -225,6 +266,11 @@ function InspectionView({
           title="CultCache Structure"
           style={{ minHeight: 620 }}
         />
+        {graphProjection.truncatedValueNodes > 0 ? (
+          <div className="graph-warning">
+            Payload tree clipped after {MAX_EXPANDED_VALUE_NODES} value nodes; {graphProjection.truncatedValueNodes} deeper node(s) omitted from the graph. Raw payload detail remains below.
+          </div>
+        ) : null}
       </section>
       <div className="columns">
         <section className="panel">
@@ -359,13 +405,17 @@ function Facts({ rows }: { rows: Array<[string, string]> }) {
   );
 }
 
-function buildGraphProjection(inspection: CultCacheInspection): GraphProjection {
+function buildGraphProjection(inspection: CultCacheInspection, expandedRecordIndex: number): GraphProjection {
   const dataflowNodes: EpiphanyGraphNode[] = [];
   const dataflowEdges: EpiphanyGraphEdge[] = [];
   const recordNodeIds: string[] = [];
   const catalogNodeIds: string[] = [];
   const nodeSelections = new Map<string, RawSelection>();
   const edgeSelections = new Map<string, RawSelection>();
+  const budget = {
+    remainingValueNodes: MAX_EXPANDED_VALUE_NODES,
+    truncatedValueNodes: 0,
+  };
   const architectureNodes: EpiphanyGraphNode[] = [
     {
       id: "store",
@@ -467,17 +517,20 @@ function buildGraphProjection(inspection: CultCacheInspection): GraphProjection 
       });
     }
 
-    appendValueTree({
-      nodes: dataflowNodes,
-      edges: dataflowEdges,
-      nodeSelections,
-      edgeSelections,
-      rawSelection: { kind: "record", index: recordIndex },
-      parentId: recordNodeId,
-      value: record.payloadPreview,
-      path: "payload",
-      depth: 0,
-    });
+    if (recordIndex === expandedRecordIndex) {
+      appendValueTree({
+        nodes: dataflowNodes,
+        edges: dataflowEdges,
+        nodeSelections,
+        edgeSelections,
+        rawSelection: { kind: "record", index: recordIndex },
+        parentId: recordNodeId,
+        value: record.payloadPreview,
+        path: "payload",
+        depth: 0,
+        budget,
+      });
+    }
   });
 
   return {
@@ -490,6 +543,7 @@ function buildGraphProjection(inspection: CultCacheInspection): GraphProjection 
     catalogNodeIds,
     nodeSelections,
     edgeSelections,
+    truncatedValueNodes: budget.truncatedValueNodes,
   };
 }
 
@@ -503,6 +557,7 @@ function appendValueTree({
   value,
   path,
   depth,
+  budget,
 }: {
   nodes: EpiphanyGraphNode[];
   edges: EpiphanyGraphEdge[];
@@ -513,13 +568,18 @@ function appendValueTree({
   value: unknown;
   path: string;
   depth: number;
+  budget: { remainingValueNodes: number; truncatedValueNodes: number };
 }): void {
   if (depth > 5) {
+    budget.truncatedValueNodes += countExpandableChildren(value);
     return;
   }
 
   if (Array.isArray(value)) {
     value.forEach((item, index) => {
+      if (!takeValueNodeBudget(budget, item)) {
+        return;
+      }
       const childPath = `${path}[${index}]`;
       const childId = nodeId("value", `${parentId}:${childPath}`);
       nodeSelections.set(childId, rawSelection);
@@ -527,13 +587,16 @@ function appendValueTree({
       const edge = valueEdge(parentId, childId, "slot", index.toString());
       edgeSelections.set(edge.id!, rawSelection);
       edges.push(edge);
-      appendValueTree({ nodes, edges, nodeSelections, edgeSelections, rawSelection, parentId: childId, value: item, path: childPath, depth: depth + 1 });
+      appendValueTree({ nodes, edges, nodeSelections, edgeSelections, rawSelection, parentId: childId, value: item, path: childPath, depth: depth + 1, budget });
     });
     return;
   }
 
   if (isPlainObject(value)) {
     for (const [key, item] of Object.entries(value)) {
+      if (!takeValueNodeBudget(budget, item)) {
+        continue;
+      }
       const childPath = `${path}.${key}`;
       const childId = nodeId("value", `${parentId}:${childPath}`);
       nodeSelections.set(childId, rawSelection);
@@ -541,9 +604,32 @@ function appendValueTree({
       const edge = valueEdge(parentId, childId, "field", key);
       edgeSelections.set(edge.id!, rawSelection);
       edges.push(edge);
-      appendValueTree({ nodes, edges, nodeSelections, edgeSelections, rawSelection, parentId: childId, value: item, path: childPath, depth: depth + 1 });
+      appendValueTree({ nodes, edges, nodeSelections, edgeSelections, rawSelection, parentId: childId, value: item, path: childPath, depth: depth + 1, budget });
     }
   }
+}
+
+function takeValueNodeBudget(
+  budget: { remainingValueNodes: number; truncatedValueNodes: number },
+  value: unknown,
+): boolean {
+  if (budget.remainingValueNodes <= 0) {
+    budget.truncatedValueNodes += 1 + countExpandableChildren(value);
+    return false;
+  }
+
+  budget.remainingValueNodes -= 1;
+  return true;
+}
+
+function countExpandableChildren(value: unknown): number {
+  if (Array.isArray(value)) {
+    return value.length;
+  }
+  if (isPlainObject(value)) {
+    return Object.keys(value).length;
+  }
+  return 0;
 }
 
 function valueNode(id: string, title: string, value: unknown, path: string): EpiphanyGraphNode {
@@ -600,6 +686,7 @@ function emptyGraphProjection(): GraphProjection {
     catalogNodeIds: [],
     nodeSelections: new Map(),
     edgeSelections: new Map(),
+    truncatedValueNodes: 0,
   };
 }
 

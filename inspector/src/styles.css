@@ -164,6 +164,15 @@ code {
   box-shadow: 0 22px 46px rgba(0, 0, 0, 0.28);
 }
 
+.graph-warning {
+  border-top: 1px solid rgba(212, 154, 61, 0.3);
+  background: rgba(72, 45, 12, 0.34);
+  color: #ffd38a;
+  padding: 10px 12px;
+  font-size: 12px;
+  line-height: 1.35;
+}
+
 .hero {
   display: grid;
   align-content: center;
@@ -317,6 +326,14 @@ pre {
   color: var(--danger);
   padding: 10px;
   overflow-wrap: anywhere;
+}
+
+.fatal-error {
+  display: grid;
+  gap: 8px;
+  max-width: 720px;
+  margin: 32px;
+  padding: 16px;
 }
 
 .empty {
