@@ -3,11 +3,15 @@
   "compilerOptions": {
     "lib": ["ES2022", "DOM", "DOM.Iterable"],
     "jsx": "react-jsx",
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
     "noEmit": true,
-    "rootDir": "."
+    "rootDir": ".",
+    "types": ["vite/client"]
   },
   "include": [
     "inspector/src/**/*.ts",
+    "inspector/src/**/*.tsx",
     "src/cult-cache-inspector.ts"
   ]
 }

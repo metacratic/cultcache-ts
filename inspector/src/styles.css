@@ -160,8 +160,29 @@ code {
   border: 1px solid var(--line);
   border-radius: 8px;
   overflow: hidden;
-  background: rgba(5, 9, 13, 0.94);
+  background: #03070a;
   box-shadow: 0 22px 46px rgba(0, 0, 0, 0.28);
+}
+
+.graph-panel > section {
+  min-height: 620px !important;
+}
+
+.huginn-field-canvas {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  width: 100%;
+  height: 100%;
+  image-rendering: pixelated;
+  opacity: 0.96;
+  pointer-events: none;
+}
+
+.epiphany-graph-overlay-panel {
+  background: rgba(4, 11, 16, 0.72) !important;
+  border-color: rgba(51, 230, 243, 0.22) !important;
+  box-shadow: 0 0 28px rgba(51, 230, 243, 0.08), 0 18px 48px rgba(0, 0, 0, 0.28) !important;
 }
 
 .graph-warning {

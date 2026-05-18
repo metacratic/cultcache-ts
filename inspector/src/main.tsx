@@ -3,6 +3,7 @@ import { createRoot } from "react-dom/client";
 import { Component, useMemo, useState, type DragEvent, type ReactNode } from "react";
 
 import { inspectCultCacheBytes, type CultCacheInspection, type InspectedCatalogEntry, type InspectedRecord } from "../../src/cult-cache-inspector";
+import { HuginnFieldCanvas } from "./HuginnFieldCanvas";
 import "./styles.css";
 
 type Selection = {
@@ -24,17 +25,12 @@ type GraphProjection = {
 };
 
 const MAX_EXPANDED_VALUE_NODES = 320;
+const assetPath = (name: string) => `${import.meta.env.BASE_URL}${name}`;
 
 const app = document.querySelector<HTMLDivElement>("#app");
 if (!app) {
   throw new Error("Missing inspector app root.");
 }
-
-createRoot(app).render(
-  <RenderCrashBoundary>
-    <HuginApp />
-  </RenderCrashBoundary>,
-);
 
 class RenderCrashBoundary extends Component<{ children: ReactNode }, { error: string | null }> {
   state = { error: null };
@@ -49,9 +45,9 @@ class RenderCrashBoundary extends Component<{ children: ReactNode }, { error: st
         <main className="workspace">
           <section className="sidebar">
             <div className="brand">
-              <img src="/hugin-64.png" alt="" width="64" height="64" />
+              <img src={assetPath("hugin-64.png")} alt="" width="64" height="64" />
               <div>
-                <h1>Hugin</h1>
+                <h1>Huginn</h1>
                 <p>CultCache state inspection for <code>.cc</code> files.</p>
               </div>
             </div>
@@ -70,7 +66,13 @@ class RenderCrashBoundary extends Component<{ children: ReactNode }, { error: st
   }
 }
 
-function HuginApp() {
+createRoot(app).render(
+  <RenderCrashBoundary>
+    <HuginnApp />
+  </RenderCrashBoundary>,
+);
+
+function HuginnApp() {
   const [inspection, setInspection] = useState<CultCacheInspection | undefined>();
   const [selection, setSelection] = useState<Selection>({ record: 0, catalog: 0 });
   const [graphSelection, setGraphSelection] = useState<ViewerSelection | null>(null);
@@ -120,9 +122,9 @@ function HuginApp() {
     >
       <section className="sidebar">
         <div className="brand">
-          <img src="/hugin-64.png" alt="" width="64" height="64" />
+          <img src={assetPath("hugin-64.png")} alt="" width="64" height="64" />
           <div>
-            <h1>Hugin</h1>
+            <h1>Huginn</h1>
             <p>CultCache state inspection for <code>.cc</code> files.</p>
           </div>
         </div>
@@ -195,7 +197,7 @@ function Metric({ label, value }: { label: string; value: string }) {
 function NoFile() {
   return (
     <div className="hero">
-      <img src="/hugin.png" alt="" />
+      <img src={assetPath("hugin.png")} alt="" />
       <h2>No state loaded</h2>
       <p>Drag a CultCache <code>.cc</code> store into the window to inspect the snapshot header, schema catalog, records, and decoded MessagePack payloads.</p>
     </div>
@@ -264,6 +266,11 @@ function InspectionView({
           selection={graphSelection}
           onSelectionChange={selectGraph}
           title="CultCache Structure"
+          viewportBackdrop={<HuginnFieldCanvas imageUrl={assetPath("hugin.png")} />}
+          viewportBackground="#03070a"
+          overlayPanels
+          showSidebar={false}
+          graphLabels={{ architecture: "File", dataflow: "Payload" }}
           style={{ minHeight: 620 }}
         />
         {graphProjection.truncatedValueNodes > 0 ? (

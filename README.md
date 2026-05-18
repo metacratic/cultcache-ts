@@ -32,7 +32,7 @@ This is not an ORM in a fake mustache. It is for cases where you want:
 
 That keeps the polymorphic boundary tight without making callers write boilerplate by candlelight.
 
-## Hugin Inspector
+## Huginn Inspector
 
 CultCache files may use the `.cc` extension. The bytes are still the canonical
 `cultcache.store.v1` MessagePack snapshot; the extension is the human handle, not
@@ -56,7 +56,7 @@ Build the desktop package:
 npm run dist:inspector
 ```
 
-Hugin is read-only. Drop a `.cc`, `.msgpack`, or `.mpack` file onto the window to
+Huginn is read-only. Drop a `.cc`, `.msgpack`, or `.mpack` file onto the window to
 inspect the snapshot header, schema catalog, records, decoded MessagePack
 payload previews, and an EpiphanyGraph view of the file's structured data tree
 without registering application schemas.

@@ -1,7 +1,7 @@
 {
   "appId": "com.gamecult.cultcache.inspector",
-  "productName": "Hugin",
-  "executableName": "Hugin",
+  "productName": "Huginn",
+  "executableName": "Huginn",
   "asar": false,
   "icon": "inspector/public/hugin.ico",
   "extraMetadata": {
@@ -17,7 +17,7 @@
   "win": {
     "signAndEditExecutable": false,
     "target": ["portable"],
-    "artifactName": "Hugin-${version}.${ext}"
+    "artifactName": "Huginn-${version}.${ext}"
   },
   "mac": {
     "target": ["dir"]
