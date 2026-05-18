@@ -214,6 +214,28 @@ code {
   height: 100vh;
 }
 
+.huginn-graph-shell svg {
+  filter: drop-shadow(0 0 12px rgba(51, 230, 243, 0.28));
+}
+
+.huginn-graph-shell svg path[stroke]:not([stroke="transparent"]) {
+  opacity: 1;
+  stroke-width: 2.4px;
+}
+
+.huginn-graph-shell svg rect[filter] {
+  fill-opacity: 0.94;
+  stroke-opacity: 1;
+}
+
+.huginn-graph-shell svg text {
+  fill-opacity: 1;
+  paint-order: stroke;
+  stroke: rgba(1, 6, 10, 0.72);
+  stroke-width: 2px;
+  stroke-linejoin: round;
+}
+
 .huginn-graph-shell .epiphany-graph-overlay-panel,
 .floating-panel {
   opacity: 0.28;

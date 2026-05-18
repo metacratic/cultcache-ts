@@ -53,6 +53,12 @@ type NodeEnvelope = {
   strength: number;
 };
 
+type GraphViewportTransform = {
+  x: number;
+  y: number;
+  scale: number;
+};
+
 const gpuParticleComputeShader = /* wgsl */ `
 struct Particle {
   position: vec2f,
@@ -75,7 +81,9 @@ struct SimUniforms {
   detail: f32,
   envelopeCount: f32,
   nodeGain: f32,
-  pad0: f32,
+  terrainOffsetX: f32,
+  terrainOffsetY: f32,
+  terrainScale: f32,
   pad1: f32,
 };
 
@@ -227,7 +235,9 @@ struct SimUniforms {
   detail: f32,
   envelopeCount: f32,
   nodeGain: f32,
-  pad0: f32,
+  terrainOffsetX: f32,
+  terrainOffsetY: f32,
+  terrainScale: f32,
   pad1: f32,
 };
 
@@ -256,7 +266,11 @@ fn vertexMain(@builtin(vertex_index) vertexIndex: u32, @builtin(instance_index) 
   let tangent = vec2f(-direction.y, direction.x);
   let stretch = clamp(length(particle.velocity) / 92.0, 0.0, 2.1);
   let ellipse = direction * local.x * particle.size * (1.0 + stretch * 0.48) + tangent * local.y * particle.size * (0.74 + renderUniforms.detail * 0.035);
-  let pixelPosition = particle.position * vec2f(renderUniforms.width, renderUniforms.height) + ellipse;
+  let center = vec2f(renderUniforms.width, renderUniforms.height) * 0.5;
+  let terrainScale = max(renderUniforms.terrainScale, 0.05);
+  let terrainOffset = vec2f(renderUniforms.terrainOffsetX, renderUniforms.terrainOffsetY);
+  let basePosition = (particle.position * vec2f(renderUniforms.width, renderUniforms.height) - center) * terrainScale + center + terrainOffset;
+  let pixelPosition = basePosition + ellipse * sqrt(terrainScale);
   var out: VertexOut;
   out.position = vec4f((pixelPosition.x / renderUniforms.width) * 2.0 - 1.0, 1.0 - (pixelPosition.y / renderUniforms.height) * 2.0, 0.0, 1.0);
   out.color = particle.color * (1.0 - abs(particle.life - 0.5) * 0.44);
@@ -555,7 +569,7 @@ async function startGpuParticleField(canvas: HTMLCanvasElement, sample: FieldSam
   particleBuffer.unmap();
 
   const uniformBuffer = device.createBuffer({
-    size: 12 * Float32Array.BYTES_PER_ELEMENT,
+    size: 16 * Float32Array.BYTES_PER_ELEMENT,
     usage: 64 | 8,
   });
   const nodeEnvelopeBuffer = device.createBuffer({
@@ -565,6 +579,13 @@ async function startGpuParticleField(canvas: HTMLCanvasElement, sample: FieldSam
   const nodeEnvelopeState = {
     data: new Float32Array(MAX_NODE_ENVELOPES * 4),
     count: 0,
+  };
+  const transformState: {
+    base: GraphViewportTransform | null;
+    current: GraphViewportTransform;
+  } = {
+    base: null,
+    current: { x: 0, y: 0, scale: 1 },
   };
 
   const computeShader = device.createShaderModule({ code: gpuParticleComputeShader });
@@ -614,6 +635,7 @@ async function startGpuParticleField(canvas: HTMLCanvasElement, sample: FieldSam
     targetDetail = nextDetail;
   });
   const envelopeListener = attachNodeEnvelopeListener(canvas, nodeEnvelopeState, device, nodeEnvelopeBuffer);
+  const transformListener = attachViewportTransformListener(canvas, transformState);
 
   const frame = (time: number) => {
     if (stopped) {
@@ -625,6 +647,8 @@ async function startGpuParticleField(canvas: HTMLCanvasElement, sample: FieldSam
     lastTime = time;
     detail += (targetDetail - detail) * Math.min(1, dt * 4.8);
     const activeParticleCount = Math.floor(PARTICLE_COUNT * Math.min(1, 0.34 + detail * 0.22));
+    const baseTransform = transformState.base ?? transformState.current;
+    const terrainScale = Math.max(0.18, Math.min(16, transformState.current.scale / Math.max(0.001, baseTransform.scale)));
     device.queue.writeBuffer(uniformBuffer, 0, new Float32Array([
       time / 1000,
       dt,
@@ -636,7 +660,9 @@ async function startGpuParticleField(canvas: HTMLCanvasElement, sample: FieldSam
       detail,
       nodeEnvelopeState.count,
       1.12 + detail * 0.18,
-      0,
+      transformState.current.x - baseTransform.x,
+      transformState.current.y - baseTransform.y,
+      terrainScale,
       0,
     ]));
 
@@ -670,6 +696,7 @@ async function startGpuParticleField(canvas: HTMLCanvasElement, sample: FieldSam
     observer.disconnect();
     detailController();
     envelopeListener();
+    transformListener();
     particleBuffer.destroy();
     uniformBuffer.destroy();
     nodeEnvelopeBuffer.destroy();
@@ -775,6 +802,31 @@ function attachNodeEnvelopeListener(
   };
   target.addEventListener("epiphanygraph-node-envelopes", onEnvelopes as EventListener);
   return () => target.removeEventListener("epiphanygraph-node-envelopes", onEnvelopes as EventListener);
+}
+
+function attachViewportTransformListener(
+  canvas: HTMLCanvasElement,
+  state: { base: GraphViewportTransform | null; current: GraphViewportTransform },
+): () => void {
+  const target = canvas.parentElement ?? canvas;
+  const onTransform = (event: Event) => {
+    const detail = (event as CustomEvent<Partial<GraphViewportTransform>>).detail;
+    if (
+      typeof detail?.x !== "number" ||
+      typeof detail.y !== "number" ||
+      typeof detail.scale !== "number"
+    ) {
+      return;
+    }
+    state.current = {
+      x: detail.x,
+      y: detail.y,
+      scale: detail.scale,
+    };
+    state.base ??= state.current;
+  };
+  target.addEventListener("epiphanygraph-viewport-transform", onTransform as EventListener);
+  return () => target.removeEventListener("epiphanygraph-viewport-transform", onTransform as EventListener);
 }
 
 function resizeGpuCanvas(canvas: HTMLCanvasElement): void {
