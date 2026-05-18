@@ -23,8 +23,7 @@ type FieldSample = {
   analysis: Float32Array;
   flowX: Float32Array;
   flowY: Float32Array;
-  normalX: Float32Array;
-  normalY: Float32Array;
+  fieldStrength: Float32Array;
 };
 
 type PyramidLevel = {
@@ -44,12 +43,10 @@ const ENERGY_SPLIT_THRESHOLD = 0.038;
 
 type HuginnFieldCanvasProps = {
   imageUrl: string;
-  curvatureUrl?: string;
-  flowUrl?: string;
-  normalUrl?: string;
+  fieldUrl: string;
 };
 
-export function HuginnFieldCanvas({ imageUrl, curvatureUrl, flowUrl, normalUrl }: HuginnFieldCanvasProps) {
+export function HuginnFieldCanvas({ imageUrl, fieldUrl }: HuginnFieldCanvasProps) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
 
   useEffect(() => {
@@ -61,17 +58,15 @@ export function HuginnFieldCanvas({ imageUrl, curvatureUrl, flowUrl, normalUrl }
     let cancelled = false;
     const render = async () => {
       try {
-        const [image, curvatureImage, flowImage, normalImage] = await Promise.all([
+        const [image, fieldImage] = await Promise.all([
           loadImage(imageUrl),
-          curvatureUrl ? loadImage(curvatureUrl) : Promise.resolve(undefined),
-          flowUrl ? loadImage(flowUrl) : Promise.resolve(undefined),
-          normalUrl ? loadImage(normalUrl) : Promise.resolve(undefined),
+          loadImage(fieldUrl),
         ]);
         if (cancelled) {
           return;
         }
 
-        const sample = sampleImage(image, curvatureImage, flowImage, normalImage);
+        const sample = sampleImage(image, fieldImage);
         const pyramid = buildCurvaturePyramid(sample);
         const brushes = buildBrushes(sample, pyramid);
         const observer = new ResizeObserver(() => drawField(canvas, brushes, sample));
@@ -93,7 +88,7 @@ export function HuginnFieldCanvas({ imageUrl, curvatureUrl, flowUrl, normalUrl }
       cancelled = true;
       cleanup?.();
     };
-  }, [curvatureUrl, flowUrl, imageUrl, normalUrl]);
+  }, [fieldUrl, imageUrl]);
 
   return <canvas ref={canvasRef} className="huginn-field-canvas" aria-hidden="true" />;
 }
@@ -116,17 +111,21 @@ function loadImage(url: string): Promise<HTMLImageElement> {
 
 function sampleImage(
   image: HTMLImageElement,
-  curvatureImage?: HTMLImageElement,
-  flowImage?: HTMLImageElement,
-  normalImage?: HTMLImageElement,
+  fieldImage: HTMLImageElement,
 ): FieldSample {
   const base = sampleBitmap(image);
-  const curvature = curvatureImage ? sampleBitmap(curvatureImage) : undefined;
-  const flow = flowImage ? sampleBitmap(flowImage) : undefined;
-  const normal = normalImage ? sampleBitmap(normalImage) : undefined;
-  const analysis = curvature?.luma ?? base.luma;
-  const flowVectors = flow ? buildFlowVectors(flow) : emptyVectors();
-  const normalVectors = normal ? buildNormalVectors(normal) : emptyVectors();
+  const field = sampleBitmap(fieldImage);
+  const analysis = new Float32Array(FIELD_SIZE * FIELD_SIZE);
+  const flowX = new Float32Array(FIELD_SIZE * FIELD_SIZE);
+  const flowY = new Float32Array(FIELD_SIZE * FIELD_SIZE);
+  const fieldStrength = new Float32Array(FIELD_SIZE * FIELD_SIZE);
+  for (let index = 0; index < analysis.length; index += 1) {
+    const source = index * 4;
+    flowX[index] = field.rgba[source] / 255 * 2 - 1;
+    flowY[index] = field.rgba[source + 1] / 255 * 2 - 1;
+    analysis[index] = field.rgba[source + 2] / 255 * base.alpha[index];
+    fieldStrength[index] = field.rgba[source + 3] / 255;
+  }
 
   return {
     width: FIELD_SIZE,
@@ -135,10 +134,9 @@ function sampleImage(
     luma: base.luma,
     alpha: base.alpha,
     analysis,
-    flowX: flowVectors.x,
-    flowY: flowVectors.y,
-    normalX: normalVectors.x,
-    normalY: normalVectors.y,
+    flowX,
+    flowY,
+    fieldStrength,
   };
 }
 
@@ -170,45 +168,6 @@ function sampleBitmap(image: HTMLImageElement) {
   }
 
   return { rgba, luma, alpha };
-}
-
-function emptyVectors() {
-  return {
-    x: new Float32Array(FIELD_SIZE * FIELD_SIZE),
-    y: new Float32Array(FIELD_SIZE * FIELD_SIZE),
-  };
-}
-
-function buildFlowVectors(flow: { luma: Float32Array }) {
-  const x = new Float32Array(FIELD_SIZE * FIELD_SIZE);
-  const y = new Float32Array(FIELD_SIZE * FIELD_SIZE);
-  for (let yy = 0; yy < FIELD_SIZE; yy += 1) {
-    for (let xx = 0; xx < FIELD_SIZE; xx += 1) {
-      const left = scalarAt(flow.luma, FIELD_SIZE, FIELD_SIZE, xx - 1, yy);
-      const right = scalarAt(flow.luma, FIELD_SIZE, FIELD_SIZE, xx + 1, yy);
-      const up = scalarAt(flow.luma, FIELD_SIZE, FIELD_SIZE, xx, yy - 1);
-      const down = scalarAt(flow.luma, FIELD_SIZE, FIELD_SIZE, xx, yy + 1);
-      const dx = (right - left) * 0.5;
-      const dy = (down - up) * 0.5;
-      const length = Math.max(0.0001, Math.hypot(dx, dy));
-      const index = yy * FIELD_SIZE + xx;
-      x[index] = -dy / length;
-      y[index] = dx / length;
-    }
-  }
-  return { x, y };
-}
-
-function buildNormalVectors(normal: { rgba: Uint8ClampedArray; alpha: Float32Array }) {
-  const x = new Float32Array(FIELD_SIZE * FIELD_SIZE);
-  const y = new Float32Array(FIELD_SIZE * FIELD_SIZE);
-  for (let index = 0; index < x.length; index += 1) {
-    const source = index * 4;
-    const alpha = normal.alpha[index];
-    x[index] = (normal.rgba[source] / 255 * 2 - 1) * alpha;
-    y[index] = (normal.rgba[source + 1] / 255 * 2 - 1) * alpha;
-  }
-  return { x, y };
 }
 
 function buildCurvaturePyramid(sample: FieldSample): PyramidLevel[] {
@@ -452,12 +411,11 @@ function sampleVector(sample: FieldSample, pyramid: PyramidLevel[], x: number, y
   const sourceIndex = sourceY * sample.width + sourceX;
   const flowX = sample.flowX[sourceIndex] ?? 0;
   const flowY = sample.flowY[sourceIndex] ?? 0;
-  const normalX = sample.normalX[sourceIndex] ?? 0;
-  const normalY = sample.normalY[sourceIndex] ?? 0;
+  const fieldStrength = sample.fieldStrength[sourceIndex] ?? 0;
   return {
-    gx: level.gx[index] * 54 + flowX * 0.28 + normalX * 0.18,
-    gy: level.gy[index] * 54 + flowY * 0.28 + normalY * 0.18,
-    curve: level.curve[index],
+    gx: level.gx[index] * 46 + flowX * 0.72,
+    gy: level.gy[index] * 46 + flowY * 0.72,
+    curve: Math.max(level.curve[index], fieldStrength),
   };
 }
 

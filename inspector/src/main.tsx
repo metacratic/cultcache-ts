@@ -27,19 +27,15 @@ type GraphProjection = {
 const MAX_EXPANDED_VALUE_NODES = 320;
 const assetPath = (name: string) => `${import.meta.env.BASE_URL}${name}`;
 const HUGINN_ART = {
-  ground: assetPath("huginn-groundtruth-alpha.png"),
-  curvature: assetPath("huginn-curvature.png"),
-  flow: assetPath("huginn-flow.png"),
-  normal: assetPath("huginn-normal.png"),
+  surface: assetPath("huginn-surface.png"),
+  field: assetPath("huginn-fieldpack.png"),
 };
 
 function HuginnField() {
   return (
     <HuginnFieldCanvas
-      imageUrl={HUGINN_ART.ground}
-      curvatureUrl={HUGINN_ART.curvature}
-      flowUrl={HUGINN_ART.flow}
-      normalUrl={HUGINN_ART.normal}
+      imageUrl={HUGINN_ART.surface}
+      fieldUrl={HUGINN_ART.field}
     />
   );
 }
@@ -250,7 +246,7 @@ function Metric({ label, value }: { label: string; value: string }) {
 function NoFile() {
   return (
     <div className="hero">
-      <img src={HUGINN_ART.ground} alt="" />
+      <img src={HUGINN_ART.surface} alt="" />
       <h2>No state loaded</h2>
       <p>Drag a CultCache <code>.cc</code> store into the window to inspect the snapshot header, schema catalog, records, and decoded MessagePack payloads.</p>
     </div>
