@@ -43,6 +43,15 @@ const MIN_BRUSH_SIZE = 4;
 const ENERGY_SPLIT_THRESHOLD = 0.038;
 const PARTICLE_COUNT = new URLSearchParams(globalThis.location?.search ?? "").has("smoke") ? 24_576 : 196_608;
 const PARTICLE_STRIDE_FLOATS = 12;
+const MAX_NODE_ENVELOPES = 96;
+
+type NodeEnvelope = {
+  id: string;
+  x: number;
+  y: number;
+  radius: number;
+  strength: number;
+};
 
 const gpuParticleComputeShader = /* wgsl */ `
 struct Particle {
@@ -64,12 +73,17 @@ struct SimUniforms {
   flowGain: f32,
   alpha: f32,
   detail: f32,
+  envelopeCount: f32,
+  nodeGain: f32,
+  pad0: f32,
+  pad1: f32,
 };
 
 @group(0) @binding(0) var<storage, read_write> particles: array<Particle>;
 @group(0) @binding(1) var<uniform> uniforms: SimUniforms;
 @group(0) @binding(2) var fieldSampler: sampler;
 @group(0) @binding(3) var fieldTexture: texture_2d<f32>;
+@group(0) @binding(4) var<storage, read> nodeEnvelopes: array<vec4f>;
 
 fn hash(value: f32) -> f32 {
   return fract(sin(value * 12.9898) * 43758.5453);
@@ -132,7 +146,26 @@ fn updateParticles(@builtin(global_invocation_id) id: vec3u) {
   let channelPull = inward * (packed.a * 24.0 + packed.b * 8.0);
   let cell = floor(position / max(12.0, 38.0 / detail));
   let jitter = vec2f(hash2(cell + particle.seed), hash2(cell + vec2f(7.0, 13.0) + particle.seed)) - vec2f(0.5);
-  let velocity = fieldVelocity + turbulence + ridgeSlip + channelPull + jitter * (5.0 + packed.a * 18.0) * detail;
+  var nodePush = vec2f(0.0);
+  var nodeHeat = 0.0;
+  for (var envelopeIndex = 0u; envelopeIndex < ${MAX_NODE_ENVELOPES}u; envelopeIndex = envelopeIndex + 1u) {
+    if (f32(envelopeIndex) >= uniforms.envelopeCount) {
+      break;
+    }
+    let envelope = nodeEnvelopes[envelopeIndex];
+    let delta = uv - envelope.xy;
+    let radius = max(envelope.z, 0.008);
+    let normalized = dot(delta, delta) / (radius * radius);
+    let edge = exp(-4.0);
+    let gaussian = exp(-4.0 * normalized);
+    let influence = pow(clamp((gaussian - edge) / max(1.0 - edge, 0.000001), 0.0, 1.0), 0.78) * envelope.w * uniforms.nodeGain;
+    let away = normalize(delta + vec2f(0.0001, 0.0));
+    let swirl = vec2f(-away.y, away.x);
+    nodePush += (swirl * 34.0 + away * 18.0) * influence;
+    nodeHeat += influence;
+  }
+
+  let velocity = fieldVelocity + turbulence + ridgeSlip + channelPull + nodePush + jitter * (5.0 + packed.a * 18.0) * detail;
 
   position = wrap2(position + velocity * uniforms.dt, canvasSize);
   uv = position / canvasSize;
@@ -157,7 +190,7 @@ fn updateParticles(@builtin(global_invocation_id) id: vec3u) {
 
   let speed = clamp(length(velocity) / (96.0 + detail * 26.0), 0.0, 1.0);
   let flowAxis = abs(fieldVector.x - fieldVector.y);
-  let heat = clamp(packed.a * 0.92 + packed.b * 0.86 + speed * 0.48, 0.0, 1.0);
+  let heat = clamp(packed.a * 0.92 + packed.b * 0.86 + speed * 0.48 + nodeHeat * 0.62, 0.0, 1.0);
   let brass = clamp((packed.b - packed.a * 0.32) * 1.35 + flowAxis * 0.18, 0.0, 1.0);
   let cyan = vec3f(0.08 + heat * 0.28, 0.44 + heat * 0.46, 0.52 + heat * 0.62);
   let gold = vec3f(0.86, 0.58, 0.22);
@@ -165,9 +198,9 @@ fn updateParticles(@builtin(global_invocation_id) id: vec3u) {
   let rgb = mix(mix(deep, cyan, 0.42 + heat * 0.58), gold, brass * 0.32);
   particle.color = vec4f(
     rgb,
-    uniforms.alpha * (0.004 + heat * 0.018 + density * 0.012) * (0.72 + detail * 0.11)
+    uniforms.alpha * (0.004 + heat * 0.018 + density * 0.012 + nodeHeat * 0.014) * (0.72 + detail * 0.11)
   );
-  particle.size = (0.52 + hash(particle.seed * 19.0) * 1.85) * (0.58 + packed.a * 1.25 + packed.b * 0.62) * (0.92 + detail * 0.12) * (1.0 - abs(particle.life - 0.5) * 0.42);
+  particle.size = (0.52 + hash(particle.seed * 19.0) * 1.85) * (0.58 + packed.a * 1.25 + packed.b * 0.62 + nodeHeat * 0.44) * (0.92 + detail * 0.12) * (1.0 - abs(particle.life - 0.5) * 0.42);
   particles[index] = particle;
 }
 `;
@@ -192,6 +225,10 @@ struct SimUniforms {
   flowGain: f32,
   alpha: f32,
   detail: f32,
+  envelopeCount: f32,
+  nodeGain: f32,
+  pad0: f32,
+  pad1: f32,
 };
 
 @group(0) @binding(0) var<storage, read> renderParticles: array<Particle>;
@@ -518,9 +555,17 @@ async function startGpuParticleField(canvas: HTMLCanvasElement, sample: FieldSam
   particleBuffer.unmap();
 
   const uniformBuffer = device.createBuffer({
-    size: 8 * Float32Array.BYTES_PER_ELEMENT,
+    size: 12 * Float32Array.BYTES_PER_ELEMENT,
     usage: 64 | 8,
   });
+  const nodeEnvelopeBuffer = device.createBuffer({
+    size: MAX_NODE_ENVELOPES * 4 * Float32Array.BYTES_PER_ELEMENT,
+    usage: 128 | 8,
+  });
+  const nodeEnvelopeState = {
+    data: new Float32Array(MAX_NODE_ENVELOPES * 4),
+    count: 0,
+  };
 
   const computeShader = device.createShaderModule({ code: gpuParticleComputeShader });
   const renderShader = device.createShaderModule({ code: gpuParticleRenderShader });
@@ -545,6 +590,7 @@ async function startGpuParticleField(canvas: HTMLCanvasElement, sample: FieldSam
       { binding: 1, resource: { buffer: uniformBuffer } },
       { binding: 2, resource: sampler },
       { binding: 3, resource: fieldTexture.createView() },
+      { binding: 4, resource: { buffer: nodeEnvelopeBuffer } },
     ],
   });
   const renderBindGroup = device.createBindGroup({
@@ -567,6 +613,7 @@ async function startGpuParticleField(canvas: HTMLCanvasElement, sample: FieldSam
   const detailController = attachDetailController(canvas, (nextDetail) => {
     targetDetail = nextDetail;
   });
+  const envelopeListener = attachNodeEnvelopeListener(canvas, nodeEnvelopeState, device, nodeEnvelopeBuffer);
 
   const frame = (time: number) => {
     if (stopped) {
@@ -587,6 +634,10 @@ async function startGpuParticleField(canvas: HTMLCanvasElement, sample: FieldSam
       92 + detail * 62,
       0.76,
       detail,
+      nodeEnvelopeState.count,
+      1.12 + detail * 0.18,
+      0,
+      0,
     ]));
 
     const encoder = device.createCommandEncoder();
@@ -618,8 +669,10 @@ async function startGpuParticleField(canvas: HTMLCanvasElement, sample: FieldSam
     cancelAnimationFrame(frameId);
     observer.disconnect();
     detailController();
+    envelopeListener();
     particleBuffer.destroy();
     uniformBuffer.destroy();
+    nodeEnvelopeBuffer.destroy();
     fieldTexture.destroy();
   };
 }
@@ -694,6 +747,34 @@ function attachDetailController(canvas: HTMLCanvasElement, setDetail: (detail: n
     targetElement.removeEventListener("wheel", onWheel);
     targetElement.removeEventListener("pointermove", onPointerMove);
   };
+}
+
+function attachNodeEnvelopeListener(
+  canvas: HTMLCanvasElement,
+  state: { data: Float32Array; count: number },
+  device: any,
+  buffer: any,
+): () => void {
+  const target = canvas.parentElement ?? canvas;
+  const onEnvelopes = (event: Event) => {
+    const envelopes = (event as CustomEvent<NodeEnvelope[]>).detail;
+    if (!Array.isArray(envelopes)) {
+      return;
+    }
+    state.data.fill(0);
+    state.count = Math.min(MAX_NODE_ENVELOPES, envelopes.length);
+    for (let index = 0; index < state.count; index += 1) {
+      const envelope = envelopes[index];
+      const offset = index * 4;
+      state.data[offset] = clamp01(envelope.x);
+      state.data[offset + 1] = clamp01(envelope.y);
+      state.data[offset + 2] = Math.max(0.006, Math.min(0.32, envelope.radius));
+      state.data[offset + 3] = Math.max(0, Math.min(1.6, envelope.strength));
+    }
+    device.queue.writeBuffer(buffer, 0, state.data);
+  };
+  target.addEventListener("epiphanygraph-node-envelopes", onEnvelopes as EventListener);
+  return () => target.removeEventListener("epiphanygraph-node-envelopes", onEnvelopes as EventListener);
 }
 
 function resizeGpuCanvas(canvas: HTMLCanvasElement): void {

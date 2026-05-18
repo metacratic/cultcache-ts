@@ -1,6 +1,6 @@
-import { EpiphanyGraphViewer, type EpiphanyGraphEdge, type EpiphanyGraphNode, type EpiphanyGraphsState, type ViewerSelection } from "@epiphanygraph/epiphany-graph-viewer";
+import { EpiphanyGraphViewer, type EpiphanyGraphEdge, type EpiphanyGraphNode, type EpiphanyGraphsState, type TerrainForceSample, type ViewerSelection } from "@epiphanygraph/epiphany-graph-viewer";
 import { createRoot } from "react-dom/client";
-import { Component, useMemo, useState, type DragEvent, type ReactNode } from "react";
+import { Component, useEffect, useMemo, useRef, useState, type DragEvent, type ReactNode } from "react";
 
 import { inspectCultCacheBytes, type CultCacheInspection, type InspectedCatalogEntry, type InspectedRecord } from "../../src/cult-cache-inspector";
 import { HuginnFieldCanvas } from "./HuginnFieldCanvas";
@@ -22,6 +22,12 @@ type GraphProjection = {
   nodeSelections: Map<string, RawSelection>;
   edgeSelections: Map<string, RawSelection>;
   truncatedValueNodes: number;
+};
+
+type TerrainTexture = {
+  width: number;
+  height: number;
+  rgba: Uint8ClampedArray;
 };
 
 const MAX_EXPANDED_VALUE_NODES = 320;
@@ -272,6 +278,7 @@ function InspectionView({
   setSelection: (selection: Selection) => void;
   onInspectFile: (file: File) => Promise<void>;
 }) {
+  const terrainForces = useHuginnTerrainForces(HUGINN_ART.field);
   const record = inspection.records[selection.record];
   const catalogEntry = inspection.catalog[selection.catalog];
   const expandedNode = graphSelection?.kind === "node"
@@ -338,6 +345,7 @@ function InspectionView({
           title="CultCache Structure"
           viewportBackdrop={<HuginnField />}
           viewportBackground="#03070a"
+          terrainForces={terrainForces}
           overlayPanels
           showSidebar={false}
           focusSelection
@@ -407,6 +415,92 @@ function InspectionView({
       </div>
     </div>
   );
+}
+
+function useHuginnTerrainForces(fieldUrl: string) {
+  const textureRef = useRef<TerrainTexture | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    loadTerrainTexture(fieldUrl)
+      .then((texture) => {
+        if (!cancelled) {
+          textureRef.current = texture;
+        }
+      })
+      .catch(() => {
+        textureRef.current = null;
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [fieldUrl]);
+
+  return useMemo(() => ({
+    strength: 1.35,
+    damping: 0.9,
+    envelopeStrength: 0.03,
+    emitNodeEnvelopes: true,
+    sample: (x: number, y: number): TerrainForceSample => {
+      const texture = textureRef.current;
+      if (!texture) {
+        const dx = x - 0.5;
+        const dy = y - 0.5;
+        const radius = Math.max(0.001, Math.hypot(dx, dy));
+        return {
+          flowX: -dy / radius * 0.35,
+          flowY: dx / radius * 0.35,
+          strength: Math.max(0, 1 - radius * 2),
+          curvature: 0.25,
+        };
+      }
+      return sampleTerrainTexture(texture, x, y);
+    },
+  }), []);
+}
+
+function loadTerrainTexture(url: string): Promise<TerrainTexture> {
+  const image = new Image();
+  image.decoding = "async";
+  image.src = url;
+  return image.decode()
+    .catch(() => new Promise<void>((resolve, reject) => {
+      if (image.complete && image.naturalWidth > 0) {
+        resolve();
+        return;
+      }
+      image.onload = () => resolve();
+      image.onerror = () => reject(new Error(`Could not load ${url}`));
+    }))
+    .then(() => {
+      const canvas = document.createElement("canvas");
+      canvas.width = 256;
+      canvas.height = 256;
+      const context = canvas.getContext("2d", { willReadFrequently: true });
+      if (!context) {
+        throw new Error("Canvas 2D context unavailable.");
+      }
+      context.imageSmoothingEnabled = true;
+      context.imageSmoothingQuality = "high";
+      context.drawImage(image, 0, 0, canvas.width, canvas.height);
+      return {
+        width: canvas.width,
+        height: canvas.height,
+        rgba: context.getImageData(0, 0, canvas.width, canvas.height).data,
+      };
+    });
+}
+
+function sampleTerrainTexture(texture: TerrainTexture, x: number, y: number): TerrainForceSample {
+  const sx = Math.max(0, Math.min(texture.width - 1, Math.floor(x * texture.width)));
+  const sy = Math.max(0, Math.min(texture.height - 1, Math.floor(y * texture.height)));
+  const index = (sy * texture.width + sx) * 4;
+  return {
+    flowX: texture.rgba[index] / 255 * 2 - 1,
+    flowY: texture.rgba[index + 1] / 255 * 2 - 1,
+    curvature: texture.rgba[index + 2] / 255,
+    strength: texture.rgba[index + 3] / 255,
+  };
 }
 
 function PanelHeader({ title, count }: { title: string; count: string }) {
