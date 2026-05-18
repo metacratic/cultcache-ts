@@ -18,6 +18,7 @@ type FieldSample = {
   width: number;
   height: number;
   rgba: Uint8ClampedArray;
+  fieldRgba: Uint8ClampedArray;
   luma: Float32Array;
   alpha: Float32Array;
   analysis: Float32Array;
@@ -40,6 +41,152 @@ const FIELD_SIZE = 256;
 const MAX_DEPTH = 6;
 const MIN_BRUSH_SIZE = 4;
 const ENERGY_SPLIT_THRESHOLD = 0.038;
+const PARTICLE_COUNT = 65_536;
+const PARTICLE_STRIDE_FLOATS = 12;
+
+const gpuParticleComputeShader = /* wgsl */ `
+struct Particle {
+  position: vec2f,
+  velocity: vec2f,
+  color: vec4f,
+  seed: f32,
+  size: f32,
+  life: f32,
+  pad: f32,
+};
+
+struct SimUniforms {
+  time: f32,
+  dt: f32,
+  width: f32,
+  height: f32,
+  particleCount: f32,
+  flowGain: f32,
+  alpha: f32,
+  pad: f32,
+};
+
+@group(0) @binding(0) var<storage, read_write> particles: array<Particle>;
+@group(0) @binding(1) var<uniform> uniforms: SimUniforms;
+@group(0) @binding(2) var fieldSampler: sampler;
+@group(0) @binding(3) var fieldTexture: texture_2d<f32>;
+
+fn hash(value: f32) -> f32 {
+  return fract(sin(value * 12.9898) * 43758.5453);
+}
+
+fn hash2(cell: vec2f) -> f32 {
+  return hash(dot(cell, vec2f(127.1, 311.7)));
+}
+
+fn wrap2(value: vec2f, size: vec2f) -> vec2f {
+  return fract(value / size) * size;
+}
+
+fn proceduralCurl(point: vec2f, seed: f32) -> vec2f {
+  let angle =
+    sin(point.x * 0.011 + uniforms.time * 0.23 + seed * 6.28318) +
+    cos(point.y * 0.017 - uniforms.time * 0.19 + seed * 4.71) +
+    sin((point.x + point.y) * 0.006 + uniforms.time * 0.11);
+  return vec2f(cos(angle * 3.14159), sin(angle * 3.14159));
+}
+
+@compute @workgroup_size(128)
+fn updateParticles(@builtin(global_invocation_id) id: vec3u) {
+  let index = id.x;
+  if (index >= u32(uniforms.particleCount)) {
+    return;
+  }
+
+  var particle = particles[index];
+  let canvasSize = vec2f(max(uniforms.width, 1.0), max(uniforms.height, 1.0));
+  var position = particle.position * canvasSize;
+  let uv = clamp(particle.position, vec2f(0.001), vec2f(0.999));
+  let packed = textureSampleLevel(fieldTexture, fieldSampler, uv, 0.0);
+  let fieldVelocity = (packed.rg * 2.0 - vec2f(1.0)) * uniforms.flowGain * (0.22 + packed.a * 1.45);
+  let turbulence = proceduralCurl(position, particle.seed) * (7.0 + packed.b * 22.0);
+  let cell = floor(position / 34.0);
+  let jitter = vec2f(hash2(cell + particle.seed), hash2(cell + vec2f(7.0, 13.0) + particle.seed)) - vec2f(0.5);
+  let velocity = fieldVelocity + turbulence + jitter * (3.0 + packed.a * 8.0);
+
+  position = wrap2(position + velocity * uniforms.dt, canvasSize);
+  particle.position = position / canvasSize;
+  particle.velocity = velocity;
+  particle.life = fract(particle.life + uniforms.dt * (0.07 + hash(particle.seed * 23.0) * 0.05));
+
+  let speed = clamp(length(velocity) / 96.0, 0.0, 1.0);
+  let heat = clamp(packed.a + packed.b * 0.72 + speed * 0.38, 0.0, 1.0);
+  particle.color = vec4f(
+    0.08 + heat * 0.34,
+    0.46 + heat * 0.42,
+    0.52 + heat * 0.56,
+    uniforms.alpha * (0.010 + heat * 0.026)
+  );
+  particle.size = (1.1 + hash(particle.seed * 19.0) * 2.6) * (0.72 + packed.a * 1.75) * (1.0 - abs(particle.life - 0.5) * 0.36);
+  particles[index] = particle;
+}
+`;
+
+const gpuParticleRenderShader = /* wgsl */ `
+struct Particle {
+  position: vec2f,
+  velocity: vec2f,
+  color: vec4f,
+  seed: f32,
+  size: f32,
+  life: f32,
+  pad: f32,
+};
+
+struct SimUniforms {
+  time: f32,
+  dt: f32,
+  width: f32,
+  height: f32,
+  particleCount: f32,
+  flowGain: f32,
+  alpha: f32,
+  pad: f32,
+};
+
+@group(0) @binding(0) var<storage, read> renderParticles: array<Particle>;
+@group(0) @binding(1) var<uniform> renderUniforms: SimUniforms;
+
+struct VertexOut {
+  @builtin(position) position: vec4f,
+  @location(0) color: vec4f,
+  @location(1) local: vec2f,
+};
+
+@vertex
+fn vertexMain(@builtin(vertex_index) vertexIndex: u32, @builtin(instance_index) instanceIndex: u32) -> VertexOut {
+  let corners = array<vec2f, 6>(
+    vec2f(-1.0, -1.0),
+    vec2f(1.0, -1.0),
+    vec2f(-1.0, 1.0),
+    vec2f(-1.0, 1.0),
+    vec2f(1.0, -1.0),
+    vec2f(1.0, 1.0)
+  );
+  let particle = renderParticles[instanceIndex];
+  let local = corners[vertexIndex];
+  let pixelPosition = particle.position * vec2f(renderUniforms.width, renderUniforms.height) + local * particle.size;
+  var out: VertexOut;
+  out.position = vec4f((pixelPosition.x / renderUniforms.width) * 2.0 - 1.0, 1.0 - (pixelPosition.y / renderUniforms.height) * 2.0, 0.0, 1.0);
+  out.color = particle.color * (1.0 - abs(particle.life - 0.5) * 0.44);
+  out.local = local;
+  return out;
+}
+
+@fragment
+fn fragmentMain(input: VertexOut) -> @location(0) vec4f {
+  let radius2 = dot(input.local, input.local);
+  let edge = exp(-4.25);
+  let gaussian = exp(-4.25 * radius2);
+  let compact = pow(clamp((gaussian - edge) / max(1.0 - edge, 0.000001), 0.0, 1.0), 0.82);
+  return vec4f(input.color.rgb * compact * 1.72, input.color.a * compact);
+}
+`;
 
 type HuginnFieldCanvasProps = {
   imageUrl: string;
@@ -67,11 +214,18 @@ export function HuginnFieldCanvas({ imageUrl, fieldUrl }: HuginnFieldCanvasProps
         }
 
         const sample = sampleImage(image, fieldImage);
+        const gpuCleanup = await startGpuParticleField(canvas, sample);
+        if (gpuCleanup) {
+          console.info("Huginn WebGPU particle field active.");
+          return gpuCleanup;
+        }
+
+        console.info("Huginn WebGPU unavailable; using canvas field fallback.");
         const pyramid = buildCurvaturePyramid(sample);
         const brushes = buildBrushes(sample, pyramid);
-        const observer = new ResizeObserver(() => drawField(canvas, brushes, sample));
+        const observer = new ResizeObserver(() => drawFieldFallback(canvas, brushes, sample));
         observer.observe(canvas);
-        drawField(canvas, brushes, sample);
+        drawFieldFallback(canvas, brushes, sample);
 
         return () => observer.disconnect();
       } catch {
@@ -131,6 +285,7 @@ function sampleImage(
     width: FIELD_SIZE,
     height: FIELD_SIZE,
     rgba: base.rgba,
+    fieldRgba: field.rgba,
     luma: base.luma,
     alpha: base.alpha,
     analysis,
@@ -265,7 +420,189 @@ function splitCell(
   });
 }
 
-function drawField(canvas: HTMLCanvasElement, brushes: Brush[], sample: FieldSample): void {
+async function startGpuParticleField(canvas: HTMLCanvasElement, sample: FieldSample): Promise<(() => void) | undefined> {
+  const gpu = (navigator as Navigator & { gpu?: any }).gpu;
+  if (!gpu) {
+    return undefined;
+  }
+
+  const context = canvas.getContext("webgpu") as any;
+  if (!context) {
+    return undefined;
+  }
+
+  const adapter = await gpu.requestAdapter();
+  const device = await adapter?.requestDevice();
+  if (!device) {
+    return undefined;
+  }
+
+  const format = gpu.getPreferredCanvasFormat();
+  context.configure({ device, format, alphaMode: "premultiplied" });
+
+  const sampler = device.createSampler({
+    addressModeU: "clamp-to-edge",
+    addressModeV: "clamp-to-edge",
+    magFilter: "linear",
+    minFilter: "linear",
+  });
+  const fieldTexture = device.createTexture({
+    size: [sample.width, sample.height, 1],
+    format: "rgba8unorm",
+    usage: 1 | 2 | 4,
+  });
+  device.queue.writeTexture(
+    { texture: fieldTexture },
+    sample.fieldRgba,
+    { bytesPerRow: sample.width * 4, rowsPerImage: sample.height },
+    { width: sample.width, height: sample.height, depthOrArrayLayers: 1 },
+  );
+
+  const particleBuffer = device.createBuffer({
+    size: PARTICLE_COUNT * PARTICLE_STRIDE_FLOATS * Float32Array.BYTES_PER_ELEMENT,
+    usage: 128 | 32 | 8,
+    mappedAtCreation: true,
+  });
+  seedParticles(new Float32Array(particleBuffer.getMappedRange()), PARTICLE_COUNT);
+  particleBuffer.unmap();
+
+  const uniformBuffer = device.createBuffer({
+    size: 8 * Float32Array.BYTES_PER_ELEMENT,
+    usage: 64 | 8,
+  });
+
+  const computeShader = device.createShaderModule({ code: gpuParticleComputeShader });
+  const renderShader = device.createShaderModule({ code: gpuParticleRenderShader });
+  const computePipeline = device.createComputePipeline({
+    layout: "auto",
+    compute: { module: computeShader, entryPoint: "updateParticles" },
+  });
+  const renderPipeline = device.createRenderPipeline({
+    layout: "auto",
+    vertex: { module: renderShader, entryPoint: "vertexMain" },
+    fragment: {
+      module: renderShader,
+      entryPoint: "fragmentMain",
+      targets: [{ format, blend: { color: { srcFactor: "one", dstFactor: "one" }, alpha: { srcFactor: "one", dstFactor: "one-minus-src-alpha" } } }],
+    },
+    primitive: { topology: "triangle-list" },
+  });
+  const bindGroup = device.createBindGroup({
+    layout: computePipeline.getBindGroupLayout(0),
+    entries: [
+      { binding: 0, resource: { buffer: particleBuffer } },
+      { binding: 1, resource: { buffer: uniformBuffer } },
+      { binding: 2, resource: sampler },
+      { binding: 3, resource: fieldTexture.createView() },
+    ],
+  });
+  const renderBindGroup = device.createBindGroup({
+    layout: renderPipeline.getBindGroupLayout(0),
+    entries: [
+      { binding: 0, resource: { buffer: particleBuffer } },
+      { binding: 1, resource: { buffer: uniformBuffer } },
+    ],
+  });
+
+  let stopped = false;
+  let frameId = 0;
+  let lastTime = performance.now();
+  const resize = () => resizeGpuCanvas(canvas);
+  const observer = new ResizeObserver(resize);
+  observer.observe(canvas);
+  resize();
+
+  const frame = (time: number) => {
+    if (stopped) {
+      return;
+    }
+
+    resize();
+    const dt = Math.min(0.033, Math.max(0.001, (time - lastTime) / 1000));
+    lastTime = time;
+    device.queue.writeBuffer(uniformBuffer, 0, new Float32Array([
+      time / 1000,
+      dt,
+      canvas.width,
+      canvas.height,
+      PARTICLE_COUNT,
+      64,
+      0.72,
+      0,
+    ]));
+
+    const encoder = device.createCommandEncoder();
+    const computePass = encoder.beginComputePass();
+    computePass.setPipeline(computePipeline);
+    computePass.setBindGroup(0, bindGroup);
+    computePass.dispatchWorkgroups(Math.ceil(PARTICLE_COUNT / 128));
+    computePass.end();
+
+    const renderPass = encoder.beginRenderPass({
+      colorAttachments: [{
+        view: context.getCurrentTexture().createView(),
+        clearValue: { r: 0.011, g: 0.027, b: 0.039, a: 1 },
+        loadOp: "clear",
+        storeOp: "store",
+      }],
+    });
+    renderPass.setPipeline(renderPipeline);
+    renderPass.setBindGroup(0, renderBindGroup);
+    renderPass.draw(6, PARTICLE_COUNT);
+    renderPass.end();
+    device.queue.submit([encoder.finish()]);
+    frameId = requestAnimationFrame(frame);
+  };
+
+  frameId = requestAnimationFrame(frame);
+  return () => {
+    stopped = true;
+    cancelAnimationFrame(frameId);
+    observer.disconnect();
+    particleBuffer.destroy();
+    uniformBuffer.destroy();
+    fieldTexture.destroy();
+  };
+}
+
+function seedParticles(particles: Float32Array, count: number): void {
+  const span = Math.ceil(Math.sqrt(count));
+  for (let index = 0; index < count; index += 1) {
+    const cellX = index % span;
+    const cellY = Math.floor(index / span);
+    const seed = hash(index * 19.19 + 3.7);
+    const offset = index * PARTICLE_STRIDE_FLOATS;
+    particles[offset] = (cellX + hash(seed * 17.0)) / span;
+    particles[offset + 1] = (cellY + hash(seed * 29.0)) / span;
+    particles[offset + 2] = 0;
+    particles[offset + 3] = 0;
+    particles[offset + 4] = 0.18;
+    particles[offset + 5] = 0.72;
+    particles[offset + 6] = 0.82;
+    particles[offset + 7] = 0.018;
+    particles[offset + 8] = seed;
+    particles[offset + 9] = 1.4 + hash(seed * 43.0) * 2.2;
+    particles[offset + 10] = 0;
+    particles[offset + 11] = 0;
+  }
+}
+
+function hash(value: number): number {
+  return Math.sin(value * 12.9898) * 43758.5453 % 1;
+}
+
+function resizeGpuCanvas(canvas: HTMLCanvasElement): void {
+  const rect = canvas.getBoundingClientRect();
+  const scale = window.devicePixelRatio || 1;
+  const width = Math.max(1, Math.floor(rect.width * scale));
+  const height = Math.max(1, Math.floor(rect.height * scale));
+  if (canvas.width !== width || canvas.height !== height) {
+    canvas.width = width;
+    canvas.height = height;
+  }
+}
+
+function drawFieldFallback(canvas: HTMLCanvasElement, brushes: Brush[], sample: FieldSample): void {
   const rect = canvas.getBoundingClientRect();
   const scale = window.devicePixelRatio || 1;
   const width = Math.max(1, Math.floor(rect.width * scale));
