@@ -1,4 +1,4 @@
-import { EpiphanyGraphViewer, type EpiphanyGraphEdge, type EpiphanyGraphNode, type EpiphanyGraphsState, type TerrainForceSample, type ViewerSelection } from "@epiphanygraph/epiphany-graph-viewer";
+import { EpiphanyGraphViewer, type EpiphanyGraphEdge, type EpiphanyGraphNode, type EpiphanyGraphsState, type TerrainForceContext, type TerrainForceSample, type ViewerSelection } from "@epiphanygraph/epiphany-graph-viewer";
 import { createRoot } from "react-dom/client";
 import { Component, useEffect, useMemo, useRef, useState, type DragEvent, type ReactNode } from "react";
 
@@ -441,11 +441,17 @@ function useHuginnTerrainForces(fieldUrl: string) {
     damping: 0.9,
     envelopeStrength: 0.03,
     emitNodeEnvelopes: true,
-    sample: (x: number, y: number): TerrainForceSample => {
+    sample: (x: number, y: number, context: TerrainForceContext): TerrainForceSample => {
       const texture = textureRef.current;
+      const bounds = context.bounds ?? { x: 0, y: 0, width: 1, height: 1 };
+      const worldX = (x * context.viewportWidth - context.viewX) / Math.max(0.001, context.scale);
+      const worldY = (y * context.viewportHeight - context.viewY) / Math.max(0.001, context.scale);
+      const side = Math.max(1, Math.max(bounds.width, bounds.height));
+      const uvX = (worldX - (bounds.x + bounds.width * 0.5 - side * 0.5)) / side;
+      const uvY = (worldY - (bounds.y + bounds.height * 0.5 - side * 0.5)) / side;
       if (!texture) {
-        const dx = x - 0.5;
-        const dy = y - 0.5;
+        const dx = uvX - 0.5;
+        const dy = uvY - 0.5;
         const radius = Math.max(0.001, Math.hypot(dx, dy));
         return {
           flowX: -dy / radius * 0.35,
@@ -454,7 +460,7 @@ function useHuginnTerrainForces(fieldUrl: string) {
           curvature: 0.25,
         };
       }
-      return sampleTerrainTexture(texture, x, y);
+      return sampleTerrainTexture(texture, uvX, uvY);
     },
   }), []);
 }

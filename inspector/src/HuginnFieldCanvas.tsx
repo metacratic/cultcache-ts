@@ -57,6 +57,12 @@ type GraphViewportTransform = {
   x: number;
   y: number;
   scale: number;
+  bounds: {
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+  };
 };
 
 const gpuParticleComputeShader = /* wgsl */ `
@@ -81,9 +87,13 @@ struct SimUniforms {
   detail: f32,
   envelopeCount: f32,
   nodeGain: f32,
-  terrainOffsetX: f32,
-  terrainOffsetY: f32,
-  terrainScale: f32,
+  worldX: f32,
+  worldY: f32,
+  worldWidth: f32,
+  worldHeight: f32,
+  viewX: f32,
+  viewY: f32,
+  viewScale: f32,
   pad1: f32,
 };
 
@@ -235,9 +245,13 @@ struct SimUniforms {
   detail: f32,
   envelopeCount: f32,
   nodeGain: f32,
-  terrainOffsetX: f32,
-  terrainOffsetY: f32,
-  terrainScale: f32,
+  worldX: f32,
+  worldY: f32,
+  worldWidth: f32,
+  worldHeight: f32,
+  viewX: f32,
+  viewY: f32,
+  viewScale: f32,
   pad1: f32,
 };
 
@@ -266,11 +280,10 @@ fn vertexMain(@builtin(vertex_index) vertexIndex: u32, @builtin(instance_index) 
   let tangent = vec2f(-direction.y, direction.x);
   let stretch = clamp(length(particle.velocity) / 92.0, 0.0, 2.1);
   let ellipse = direction * local.x * particle.size * (1.0 + stretch * 0.48) + tangent * local.y * particle.size * (0.74 + renderUniforms.detail * 0.035);
-  let center = vec2f(renderUniforms.width, renderUniforms.height) * 0.5;
-  let terrainScale = max(renderUniforms.terrainScale, 0.05);
-  let terrainOffset = vec2f(renderUniforms.terrainOffsetX, renderUniforms.terrainOffsetY);
-  let basePosition = (particle.position * vec2f(renderUniforms.width, renderUniforms.height) - center) * terrainScale + center + terrainOffset;
-  let pixelPosition = basePosition + ellipse * sqrt(terrainScale);
+  let world = vec2f(renderUniforms.worldX, renderUniforms.worldY) + particle.position * vec2f(renderUniforms.worldWidth, renderUniforms.worldHeight);
+  let viewScale = max(renderUniforms.viewScale, 0.05);
+  let basePosition = vec2f(renderUniforms.viewX, renderUniforms.viewY) + world * viewScale;
+  let pixelPosition = basePosition + ellipse * sqrt(viewScale);
   var out: VertexOut;
   out.position = vec4f((pixelPosition.x / renderUniforms.width) * 2.0 - 1.0, 1.0 - (pixelPosition.y / renderUniforms.height) * 2.0, 0.0, 1.0);
   out.color = particle.color * (1.0 - abs(particle.life - 0.5) * 0.44);
@@ -569,7 +582,7 @@ async function startGpuParticleField(canvas: HTMLCanvasElement, sample: FieldSam
   particleBuffer.unmap();
 
   const uniformBuffer = device.createBuffer({
-    size: 16 * Float32Array.BYTES_PER_ELEMENT,
+    size: 20 * Float32Array.BYTES_PER_ELEMENT,
     usage: 64 | 8,
   });
   const nodeEnvelopeBuffer = device.createBuffer({
@@ -581,11 +594,11 @@ async function startGpuParticleField(canvas: HTMLCanvasElement, sample: FieldSam
     count: 0,
   };
   const transformState: {
-    base: GraphViewportTransform | null;
+    received: boolean;
     current: GraphViewportTransform;
   } = {
-    base: null,
-    current: { x: 0, y: 0, scale: 1 },
+    received: false,
+    current: { x: 0, y: 0, scale: 1, bounds: { x: 0, y: 0, width: 1, height: 1 } },
   };
 
   const computeShader = device.createShaderModule({ code: gpuParticleComputeShader });
@@ -647,8 +660,15 @@ async function startGpuParticleField(canvas: HTMLCanvasElement, sample: FieldSam
     lastTime = time;
     detail += (targetDetail - detail) * Math.min(1, dt * 4.8);
     const activeParticleCount = Math.floor(PARTICLE_COUNT * Math.min(1, 0.34 + detail * 0.22));
-    const baseTransform = transformState.base ?? transformState.current;
-    const terrainScale = Math.max(0.18, Math.min(16, transformState.current.scale / Math.max(0.001, baseTransform.scale)));
+    const graphTransform = transformState.received
+      ? transformState.current
+      : {
+          x: 0,
+          y: 0,
+          scale: 1,
+          bounds: { x: 0, y: 0, width: canvas.width, height: canvas.height },
+        };
+    const bounds = fitArtworkBounds(graphTransform.bounds);
     device.queue.writeBuffer(uniformBuffer, 0, new Float32Array([
       time / 1000,
       dt,
@@ -660,9 +680,13 @@ async function startGpuParticleField(canvas: HTMLCanvasElement, sample: FieldSam
       detail,
       nodeEnvelopeState.count,
       1.12 + detail * 0.18,
-      transformState.current.x - baseTransform.x,
-      transformState.current.y - baseTransform.y,
-      terrainScale,
+      bounds.x,
+      bounds.y,
+      bounds.width,
+      bounds.height,
+      graphTransform.x,
+      graphTransform.y,
+      graphTransform.scale,
       0,
     ]));
 
@@ -806,7 +830,7 @@ function attachNodeEnvelopeListener(
 
 function attachViewportTransformListener(
   canvas: HTMLCanvasElement,
-  state: { base: GraphViewportTransform | null; current: GraphViewportTransform },
+  state: { received: boolean; current: GraphViewportTransform },
 ): () => void {
   const target = canvas.parentElement ?? canvas;
   const onTransform = (event: Event) => {
@@ -822,11 +846,37 @@ function attachViewportTransformListener(
       x: detail.x,
       y: detail.y,
       scale: detail.scale,
+      bounds: isGraphBounds(detail.bounds) ? detail.bounds : state.current.bounds,
     };
-    state.base ??= state.current;
+    state.received = true;
   };
   target.addEventListener("epiphanygraph-viewport-transform", onTransform as EventListener);
   return () => target.removeEventListener("epiphanygraph-viewport-transform", onTransform as EventListener);
+}
+
+function isGraphBounds(value: unknown): value is GraphViewportTransform["bounds"] {
+  if (!value || typeof value !== "object") {
+    return false;
+  }
+  const candidate = value as Partial<GraphViewportTransform["bounds"]>;
+  return (
+    typeof candidate.x === "number" &&
+    typeof candidate.y === "number" &&
+    typeof candidate.width === "number" &&
+    typeof candidate.height === "number"
+  );
+}
+
+function fitArtworkBounds(bounds: GraphViewportTransform["bounds"]) {
+  const width = Math.max(1, bounds.width);
+  const height = Math.max(1, bounds.height);
+  const side = Math.max(width, height);
+  return {
+    x: bounds.x + width * 0.5 - side * 0.5,
+    y: bounds.y + height * 0.5 - side * 0.5,
+    width: side,
+    height: side,
+  };
 }
 
 function resizeGpuCanvas(canvas: HTMLCanvasElement): void {
