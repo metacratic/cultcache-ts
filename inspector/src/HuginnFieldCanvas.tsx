@@ -41,7 +41,7 @@ const FIELD_SIZE = 256;
 const MAX_DEPTH = 6;
 const MIN_BRUSH_SIZE = 4;
 const ENERGY_SPLIT_THRESHOLD = 0.038;
-const PARTICLE_COUNT = 65_536;
+const PARTICLE_COUNT = new URLSearchParams(globalThis.location?.search ?? "").has("smoke") ? 24_576 : 196_608;
 const PARTICLE_STRIDE_FLOATS = 12;
 
 const gpuParticleComputeShader = /* wgsl */ `
@@ -63,7 +63,7 @@ struct SimUniforms {
   particleCount: f32,
   flowGain: f32,
   alpha: f32,
-  pad: f32,
+  detail: f32,
 };
 
 @group(0) @binding(0) var<storage, read_write> particles: array<Particle>;
@@ -87,8 +87,25 @@ fn proceduralCurl(point: vec2f, seed: f32) -> vec2f {
   let angle =
     sin(point.x * 0.011 + uniforms.time * 0.23 + seed * 6.28318) +
     cos(point.y * 0.017 - uniforms.time * 0.19 + seed * 4.71) +
-    sin((point.x + point.y) * 0.006 + uniforms.time * 0.11);
+    sin((point.x + point.y) * 0.006 + uniforms.time * 0.11) +
+    sin(point.x * 0.041 + point.y * -0.032 + uniforms.time * 0.37 + seed);
   return vec2f(cos(angle * 3.14159), sin(angle * 3.14159));
+}
+
+fn samplePacked(uv: vec2f) -> vec4f {
+  return textureSampleLevel(fieldTexture, fieldSampler, clamp(uv, vec2f(0.001), vec2f(0.999)), 0.0);
+}
+
+fn channelGradient(uv: vec2f, channel: u32) -> vec2f {
+  let step = vec2f(1.0 / 256.0, 1.0 / 256.0) / max(uniforms.detail, 1.0);
+  let left = samplePacked(uv - vec2f(step.x, 0.0));
+  let right = samplePacked(uv + vec2f(step.x, 0.0));
+  let up = samplePacked(uv - vec2f(0.0, step.y));
+  let down = samplePacked(uv + vec2f(0.0, step.y));
+  if (channel == 2u) {
+    return vec2f(right.b - left.b, down.b - up.b);
+  }
+  return vec2f(right.a - left.a, down.a - up.a);
 }
 
 @compute @workgroup_size(128)
@@ -101,28 +118,56 @@ fn updateParticles(@builtin(global_invocation_id) id: vec3u) {
   var particle = particles[index];
   let canvasSize = vec2f(max(uniforms.width, 1.0), max(uniforms.height, 1.0));
   var position = particle.position * canvasSize;
-  let uv = clamp(particle.position, vec2f(0.001), vec2f(0.999));
-  let packed = textureSampleLevel(fieldTexture, fieldSampler, uv, 0.0);
-  let fieldVelocity = (packed.rg * 2.0 - vec2f(1.0)) * uniforms.flowGain * (0.22 + packed.a * 1.45);
-  let turbulence = proceduralCurl(position, particle.seed) * (7.0 + packed.b * 22.0);
-  let cell = floor(position / 34.0);
+  var uv = clamp(particle.position, vec2f(0.001), vec2f(0.999));
+  var packed = samplePacked(uv);
+  let detail = clamp(uniforms.detail, 0.65, 4.0);
+  let strengthGradient = channelGradient(uv, 3u);
+  let curvatureGradient = channelGradient(uv, 2u);
+  let tangent = normalize(vec2f(-curvatureGradient.y, curvatureGradient.x) + vec2f(0.001, 0.0));
+  let inward = normalize(strengthGradient + vec2f(0.001, 0.0));
+  let fieldVector = packed.rg * 2.0 - vec2f(1.0);
+  let fieldVelocity = fieldVector * uniforms.flowGain * (0.34 + packed.a * 2.25) * detail;
+  let turbulence = proceduralCurl(position * (0.82 + packed.b * 0.9), particle.seed) * (9.0 + packed.b * 36.0 + packed.a * 18.0) * detail;
+  let ridgeSlip = tangent * (packed.b * 30.0 + packed.a * 18.0) * detail;
+  let channelPull = inward * (packed.a * 24.0 + packed.b * 8.0);
+  let cell = floor(position / max(12.0, 38.0 / detail));
   let jitter = vec2f(hash2(cell + particle.seed), hash2(cell + vec2f(7.0, 13.0) + particle.seed)) - vec2f(0.5);
-  let velocity = fieldVelocity + turbulence + jitter * (3.0 + packed.a * 8.0);
+  let velocity = fieldVelocity + turbulence + ridgeSlip + channelPull + jitter * (5.0 + packed.a * 18.0) * detail;
 
   position = wrap2(position + velocity * uniforms.dt, canvasSize);
-  particle.position = position / canvasSize;
-  particle.velocity = velocity;
-  particle.life = fract(particle.life + uniforms.dt * (0.07 + hash(particle.seed * 23.0) * 0.05));
+  uv = position / canvasSize;
+  packed = samplePacked(uv);
 
-  let speed = clamp(length(velocity) / 96.0, 0.0, 1.0);
-  let heat = clamp(packed.a + packed.b * 0.72 + speed * 0.38, 0.0, 1.0);
+  let density = clamp(packed.a * 0.76 + packed.b * 0.54, 0.0, 1.0);
+  let die = hash(particle.seed * 91.7 + floor(uniforms.time * (7.0 + detail * 5.0)));
+  if (density < 0.10 && die > density + 0.34) {
+    let respawnSeed = particle.seed + uniforms.time * 0.071 + f32(index) * 0.000013;
+    let angle = respawnSeed * 6.28318;
+    let radius = sqrt(hash(respawnSeed * 31.0)) * (0.46 - min(packed.a, 0.32) * 0.28);
+    let center = vec2f(0.5) + vec2f(cos(angle), sin(angle)) * radius;
+    let micro = vec2f(hash(respawnSeed * 47.0), hash(respawnSeed * 59.0)) - vec2f(0.5);
+    uv = clamp(center + micro * (0.18 / detail), vec2f(0.001), vec2f(0.999));
+    position = uv * canvasSize;
+    packed = samplePacked(uv);
+  }
+
+  particle.position = uv;
+  particle.velocity = velocity;
+  particle.life = fract(particle.life + uniforms.dt * (0.08 + packed.a * 0.18 + packed.b * 0.11 + hash(particle.seed * 23.0) * 0.07) * detail);
+
+  let speed = clamp(length(velocity) / (96.0 + detail * 26.0), 0.0, 1.0);
+  let flowAxis = abs(fieldVector.x - fieldVector.y);
+  let heat = clamp(packed.a * 0.92 + packed.b * 0.86 + speed * 0.48, 0.0, 1.0);
+  let brass = clamp((packed.b - packed.a * 0.32) * 1.35 + flowAxis * 0.18, 0.0, 1.0);
+  let cyan = vec3f(0.08 + heat * 0.28, 0.44 + heat * 0.46, 0.52 + heat * 0.62);
+  let gold = vec3f(0.86, 0.58, 0.22);
+  let deep = vec3f(0.02, 0.10, 0.12);
+  let rgb = mix(mix(deep, cyan, 0.42 + heat * 0.58), gold, brass * 0.32);
   particle.color = vec4f(
-    0.08 + heat * 0.34,
-    0.46 + heat * 0.42,
-    0.52 + heat * 0.56,
-    uniforms.alpha * (0.010 + heat * 0.026)
+    rgb,
+    uniforms.alpha * (0.004 + heat * 0.018 + density * 0.012) * (0.72 + detail * 0.11)
   );
-  particle.size = (1.1 + hash(particle.seed * 19.0) * 2.6) * (0.72 + packed.a * 1.75) * (1.0 - abs(particle.life - 0.5) * 0.36);
+  particle.size = (0.52 + hash(particle.seed * 19.0) * 1.85) * (0.58 + packed.a * 1.25 + packed.b * 0.62) * (0.92 + detail * 0.12) * (1.0 - abs(particle.life - 0.5) * 0.42);
   particles[index] = particle;
 }
 `;
@@ -146,7 +191,7 @@ struct SimUniforms {
   particleCount: f32,
   flowGain: f32,
   alpha: f32,
-  pad: f32,
+  detail: f32,
 };
 
 @group(0) @binding(0) var<storage, read> renderParticles: array<Particle>;
@@ -170,7 +215,11 @@ fn vertexMain(@builtin(vertex_index) vertexIndex: u32, @builtin(instance_index) 
   );
   let particle = renderParticles[instanceIndex];
   let local = corners[vertexIndex];
-  let pixelPosition = particle.position * vec2f(renderUniforms.width, renderUniforms.height) + local * particle.size;
+  let direction = normalize(particle.velocity + vec2f(0.001, 0.0));
+  let tangent = vec2f(-direction.y, direction.x);
+  let stretch = clamp(length(particle.velocity) / 92.0, 0.0, 2.1);
+  let ellipse = direction * local.x * particle.size * (1.0 + stretch * 0.48) + tangent * local.y * particle.size * (0.74 + renderUniforms.detail * 0.035);
+  let pixelPosition = particle.position * vec2f(renderUniforms.width, renderUniforms.height) + ellipse;
   var out: VertexOut;
   out.position = vec4f((pixelPosition.x / renderUniforms.width) * 2.0 - 1.0, 1.0 - (pixelPosition.y / renderUniforms.height) * 2.0, 0.0, 1.0);
   out.color = particle.color * (1.0 - abs(particle.life - 0.5) * 0.44);
@@ -181,10 +230,12 @@ fn vertexMain(@builtin(vertex_index) vertexIndex: u32, @builtin(instance_index) 
 @fragment
 fn fragmentMain(input: VertexOut) -> @location(0) vec4f {
   let radius2 = dot(input.local, input.local);
-  let edge = exp(-4.25);
-  let gaussian = exp(-4.25 * radius2);
-  let compact = pow(clamp((gaussian - edge) / max(1.0 - edge, 0.000001), 0.0, 1.0), 0.82);
-  return vec4f(input.color.rgb * compact * 1.72, input.color.a * compact);
+  let falloff = 5.1 + renderUniforms.detail * 0.52;
+  let edge = exp(-falloff);
+  let gaussian = exp(-falloff * radius2);
+  let compact = pow(clamp((gaussian - edge) / max(1.0 - edge, 0.000001), 0.0, 1.0), 0.72);
+  let core = exp(-radius2 * 18.0) * 0.42;
+  return vec4f(input.color.rgb * (compact * 1.52 + core), input.color.a * compact);
 }
 `;
 
@@ -507,10 +558,15 @@ async function startGpuParticleField(canvas: HTMLCanvasElement, sample: FieldSam
   let stopped = false;
   let frameId = 0;
   let lastTime = performance.now();
+  let detail = 1;
+  let targetDetail = 1;
   const resize = () => resizeGpuCanvas(canvas);
   const observer = new ResizeObserver(resize);
   observer.observe(canvas);
   resize();
+  const detailController = attachDetailController(canvas, (nextDetail) => {
+    targetDetail = nextDetail;
+  });
 
   const frame = (time: number) => {
     if (stopped) {
@@ -520,22 +576,24 @@ async function startGpuParticleField(canvas: HTMLCanvasElement, sample: FieldSam
     resize();
     const dt = Math.min(0.033, Math.max(0.001, (time - lastTime) / 1000));
     lastTime = time;
+    detail += (targetDetail - detail) * Math.min(1, dt * 4.8);
+    const activeParticleCount = Math.floor(PARTICLE_COUNT * Math.min(1, 0.34 + detail * 0.22));
     device.queue.writeBuffer(uniformBuffer, 0, new Float32Array([
       time / 1000,
       dt,
       canvas.width,
       canvas.height,
-      PARTICLE_COUNT,
-      64,
-      0.72,
-      0,
+      activeParticleCount,
+      92 + detail * 62,
+      0.76,
+      detail,
     ]));
 
     const encoder = device.createCommandEncoder();
     const computePass = encoder.beginComputePass();
     computePass.setPipeline(computePipeline);
     computePass.setBindGroup(0, bindGroup);
-    computePass.dispatchWorkgroups(Math.ceil(PARTICLE_COUNT / 128));
+    computePass.dispatchWorkgroups(Math.ceil(activeParticleCount / 128));
     computePass.end();
 
     const renderPass = encoder.beginRenderPass({
@@ -548,7 +606,7 @@ async function startGpuParticleField(canvas: HTMLCanvasElement, sample: FieldSam
     });
     renderPass.setPipeline(renderPipeline);
     renderPass.setBindGroup(0, renderBindGroup);
-    renderPass.draw(6, PARTICLE_COUNT);
+    renderPass.draw(6, activeParticleCount);
     renderPass.end();
     device.queue.submit([encoder.finish()]);
     frameId = requestAnimationFrame(frame);
@@ -559,6 +617,7 @@ async function startGpuParticleField(canvas: HTMLCanvasElement, sample: FieldSam
     stopped = true;
     cancelAnimationFrame(frameId);
     observer.disconnect();
+    detailController();
     particleBuffer.destroy();
     uniformBuffer.destroy();
     fieldTexture.destroy();
@@ -571,9 +630,16 @@ function seedParticles(particles: Float32Array, count: number): void {
     const cellX = index % span;
     const cellY = Math.floor(index / span);
     const seed = hash(index * 19.19 + 3.7);
+    const angle = seed * Math.PI * 2;
+    const ring = Math.sqrt(hash(seed * 71.0)) * 0.48;
+    const latticeX = (cellX + hash(seed * 17.0)) / span;
+    const latticeY = (cellY + hash(seed * 29.0)) / span;
+    const radialX = 0.5 + Math.cos(angle) * ring + (hash(seed * 97.0) - 0.5) * 0.08;
+    const radialY = 0.5 + Math.sin(angle) * ring + (hash(seed * 113.0) - 0.5) * 0.08;
+    const radialBias = hash(seed * 41.0);
     const offset = index * PARTICLE_STRIDE_FLOATS;
-    particles[offset] = (cellX + hash(seed * 17.0)) / span;
-    particles[offset + 1] = (cellY + hash(seed * 29.0)) / span;
+    particles[offset] = radialBias < 0.64 ? clamp01(radialX) : latticeX;
+    particles[offset + 1] = radialBias < 0.64 ? clamp01(radialY) : latticeY;
     particles[offset + 2] = 0;
     particles[offset + 3] = 0;
     particles[offset + 4] = 0.18;
@@ -588,7 +654,46 @@ function seedParticles(particles: Float32Array, count: number): void {
 }
 
 function hash(value: number): number {
-  return Math.sin(value * 12.9898) * 43758.5453 % 1;
+  return fract(Math.sin(value * 12.9898) * 43758.5453);
+}
+
+function fract(value: number): number {
+  return value - Math.floor(value);
+}
+
+function clamp01(value: number): number {
+  return Math.max(0, Math.min(1, value));
+}
+
+function attachDetailController(canvas: HTMLCanvasElement, setDetail: (detail: number) => void): () => void {
+  let target = 1;
+  let lastInput = performance.now();
+  const apply = (detail: number) => {
+    target = Math.max(0.7, Math.min(4.0, detail));
+    lastInput = performance.now();
+    setDetail(target);
+  };
+  const onWheel = (event: WheelEvent) => {
+    apply(target * (event.deltaY < 0 ? 1.22 : 0.86));
+  };
+  const onPointerMove = () => {
+    apply(Math.max(target, 1.55));
+  };
+  const decay = window.setInterval(() => {
+    const idleSeconds = (performance.now() - lastInput) / 1000;
+    if (idleSeconds > 1.6) {
+      target += (1 - target) * 0.08;
+      setDetail(target);
+    }
+  }, 180);
+  const targetElement = canvas.parentElement ?? canvas;
+  targetElement.addEventListener("wheel", onWheel, { passive: true });
+  targetElement.addEventListener("pointermove", onPointerMove, { passive: true });
+  return () => {
+    window.clearInterval(decay);
+    targetElement.removeEventListener("wheel", onWheel);
+    targetElement.removeEventListener("pointermove", onPointerMove);
+  };
 }
 
 function resizeGpuCanvas(canvas: HTMLCanvasElement): void {
