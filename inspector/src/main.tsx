@@ -1,4 +1,4 @@
-import { EpiphanyGraphViewer, type EpiphanyGraphEdge, type EpiphanyGraphNode, type EpiphanyGraphsState } from "@epiphanygraph/epiphany-graph-viewer";
+import { EpiphanyGraphViewer, type EpiphanyGraphEdge, type EpiphanyGraphNode, type EpiphanyGraphsState, type ViewerSelection } from "@epiphanygraph/epiphany-graph-viewer";
 import { createRoot } from "react-dom/client";
 import { useMemo, useState, type DragEvent } from "react";
 
@@ -8,6 +8,18 @@ import "./styles.css";
 type Selection = {
   record: number;
   catalog: number;
+};
+
+type RawSelection =
+  | { kind: "record"; index: number }
+  | { kind: "catalog"; index: number };
+
+type GraphProjection = {
+  state: EpiphanyGraphsState;
+  recordNodeIds: string[];
+  catalogNodeIds: string[];
+  nodeSelections: Map<string, RawSelection>;
+  edgeSelections: Map<string, RawSelection>;
 };
 
 const app = document.querySelector<HTMLDivElement>("#app");
@@ -20,11 +32,12 @@ createRoot(app).render(<HuginApp />);
 function HuginApp() {
   const [inspection, setInspection] = useState<CultCacheInspection | undefined>();
   const [selection, setSelection] = useState<Selection>({ record: 0, catalog: 0 });
+  const [graphSelection, setGraphSelection] = useState<ViewerSelection | null>(null);
   const [errorMessage, setErrorMessage] = useState("");
   const [dragging, setDragging] = useState(false);
 
-  const graphState = useMemo(
-    () => inspection ? buildGraphState(inspection) : emptyGraphState(),
+  const graphProjection = useMemo(
+    () => inspection ? buildGraphProjection(inspection) : emptyGraphProjection(),
     [inspection],
   );
 
@@ -33,6 +46,7 @@ function HuginApp() {
       const bytes = new Uint8Array(await file.arrayBuffer());
       setInspection(inspectCultCacheBytes(file.name, bytes, file.size));
       setSelection({ record: 0, catalog: 0 });
+      setGraphSelection(null);
       setErrorMessage("");
     } catch (error) {
       setInspection(undefined);
@@ -90,7 +104,16 @@ function HuginApp() {
       </section>
       <section className="content">
         {inspection
-          ? <InspectionView inspection={inspection} graphState={graphState} selection={selection} setSelection={setSelection} />
+          ? (
+            <InspectionView
+              inspection={inspection}
+              graphProjection={graphProjection}
+              graphSelection={graphSelection}
+              setGraphSelection={setGraphSelection}
+              selection={selection}
+              setSelection={setSelection}
+            />
+          )
           : <NoFile />}
       </section>
     </main>
@@ -140,24 +163,65 @@ function NoFile() {
 
 function InspectionView({
   inspection,
-  graphState,
+  graphProjection,
+  graphSelection,
+  setGraphSelection,
   selection,
   setSelection,
 }: {
   inspection: CultCacheInspection;
-  graphState: EpiphanyGraphsState;
+  graphProjection: GraphProjection;
+  graphSelection: ViewerSelection | null;
+  setGraphSelection: (selection: ViewerSelection | null) => void;
   selection: Selection;
   setSelection: (selection: Selection) => void;
 }) {
   const record = inspection.records[selection.record];
   const catalogEntry = inspection.catalog[selection.catalog];
+  const selectRaw = (next: RawSelection) => {
+    if (next.kind === "record") {
+      setSelection({ ...selection, record: next.index });
+      setGraphSelection({
+        kind: "node",
+        graphKey: "dataflow",
+        nodeId: graphProjection.recordNodeIds[next.index],
+      });
+      return;
+    }
+
+    setSelection({ ...selection, catalog: next.index });
+    setGraphSelection({
+      kind: "node",
+      graphKey: "dataflow",
+      nodeId: graphProjection.catalogNodeIds[next.index],
+    });
+  };
+  const selectGraph = (next: ViewerSelection | null) => {
+    setGraphSelection(next);
+    if (!next) {
+      return;
+    }
+
+    const rawSelection = next.kind === "node"
+      ? graphProjection.nodeSelections.get(next.nodeId)
+      : graphProjection.edgeSelections.get(next.edgeId);
+    if (!rawSelection) {
+      return;
+    }
+
+    setSelection(rawSelection.kind === "record"
+      ? { ...selection, record: rawSelection.index }
+      : { ...selection, catalog: rawSelection.index });
+  };
 
   return (
     <div className="inspector-stack">
       <section className="graph-panel">
         <EpiphanyGraphViewer
-          state={graphState}
+          state={graphProjection.state}
           initialGraph="dataflow"
+          selection={graphSelection}
+          onSelectionChange={selectGraph}
           title="CultCache Structure"
           style={{ minHeight: 620 }}
         />
@@ -173,7 +237,7 @@ function InspectionView({
                   record={entry}
                   index={index}
                   selected={index === selection.record}
-                  onSelect={() => setSelection({ ...selection, record: index })}
+                  onSelect={() => selectRaw({ kind: "record", index })}
                 />
               ))
               : <div className="empty">No records</div>}
@@ -195,7 +259,7 @@ function InspectionView({
                   entry={entry}
                   index={index}
                   selected={index === selection.catalog}
-                  onSelect={() => setSelection({ ...selection, catalog: index })}
+                  onSelect={() => selectRaw({ kind: "catalog", index })}
                 />
               ))
               : <div className="empty">No schema catalog</div>}
@@ -295,9 +359,13 @@ function Facts({ rows }: { rows: Array<[string, string]> }) {
   );
 }
 
-function buildGraphState(inspection: CultCacheInspection): EpiphanyGraphsState {
+function buildGraphProjection(inspection: CultCacheInspection): GraphProjection {
   const dataflowNodes: EpiphanyGraphNode[] = [];
   const dataflowEdges: EpiphanyGraphEdge[] = [];
+  const recordNodeIds: string[] = [];
+  const catalogNodeIds: string[] = [];
+  const nodeSelections = new Map<string, RawSelection>();
+  const edgeSelections = new Map<string, RawSelection>();
   const architectureNodes: EpiphanyGraphNode[] = [
     {
       id: "store",
@@ -344,8 +412,10 @@ function buildGraphState(inspection: CultCacheInspection): EpiphanyGraphsState {
     status: `${inspection.fileSizeBytes} bytes`,
   });
 
-  for (const entry of inspection.catalog) {
+  for (const [catalogIndex, entry] of inspection.catalog.entries()) {
     const schemaNodeId = nodeId("schema", entry.schemaId);
+    catalogNodeIds[catalogIndex] = schemaNodeId;
+    nodeSelections.set(schemaNodeId, { kind: "catalog", index: catalogIndex });
     dataflowNodes.push({
       id: schemaNodeId,
       title: entry.schemaName,
@@ -353,8 +423,10 @@ function buildGraphState(inspection: CultCacheInspection): EpiphanyGraphsState {
       mechanism: entry.contentHash,
       status: "schema",
     });
+    const catalogEdgeId = edgeId("store", schemaNodeId, "catalogs");
+    edgeSelections.set(catalogEdgeId, { kind: "catalog", index: catalogIndex });
     dataflowEdges.push({
-      id: edgeId("store", schemaNodeId, "catalogs"),
+      id: catalogEdgeId,
       source_id: "store",
       target_id: schemaNodeId,
       kind: "catalogs",
@@ -365,6 +437,8 @@ function buildGraphState(inspection: CultCacheInspection): EpiphanyGraphsState {
   inspection.records.forEach((record, recordIndex) => {
     const recordNodeId = nodeId("record", `${record.schemaId}:${record.key}:${recordIndex}`);
     const schemaNodeId = nodeId("schema", record.schemaId);
+    recordNodeIds[recordIndex] = recordNodeId;
+    nodeSelections.set(recordNodeId, { kind: "record", index: recordIndex });
     dataflowNodes.push({
       id: recordNodeId,
       title: record.key,
@@ -372,16 +446,20 @@ function buildGraphState(inspection: CultCacheInspection): EpiphanyGraphsState {
       mechanism: `${record.payloadBytes} payload bytes stored at ${record.storedAt}`,
       status: "record",
     });
+    const recordEdgeId = edgeId("store", recordNodeId, "contains");
+    edgeSelections.set(recordEdgeId, { kind: "record", index: recordIndex });
     dataflowEdges.push({
-      id: edgeId("store", recordNodeId, "contains"),
+      id: recordEdgeId,
       source_id: "store",
       target_id: recordNodeId,
       kind: "contains",
       label: "record",
     });
     if (dataflowNodes.some((node) => node.id === schemaNodeId)) {
+      const schemaEdgeId = edgeId(recordNodeId, schemaNodeId, "uses-schema");
+      edgeSelections.set(schemaEdgeId, { kind: "record", index: recordIndex });
       dataflowEdges.push({
-        id: edgeId(recordNodeId, schemaNodeId, "uses-schema"),
+        id: schemaEdgeId,
         source_id: recordNodeId,
         target_id: schemaNodeId,
         kind: "uses-schema",
@@ -392,6 +470,9 @@ function buildGraphState(inspection: CultCacheInspection): EpiphanyGraphsState {
     appendValueTree({
       nodes: dataflowNodes,
       edges: dataflowEdges,
+      nodeSelections,
+      edgeSelections,
+      rawSelection: { kind: "record", index: recordIndex },
       parentId: recordNodeId,
       value: record.payloadPreview,
       path: "payload",
@@ -400,15 +481,24 @@ function buildGraphState(inspection: CultCacheInspection): EpiphanyGraphsState {
   });
 
   return {
-    architecture: { nodes: architectureNodes, edges: architectureEdges },
-    dataflow: { nodes: dataflowNodes, edges: dataflowEdges },
-    links: [],
+    state: {
+      architecture: { nodes: architectureNodes, edges: architectureEdges },
+      dataflow: { nodes: dataflowNodes, edges: dataflowEdges },
+      links: [],
+    },
+    recordNodeIds,
+    catalogNodeIds,
+    nodeSelections,
+    edgeSelections,
   };
 }
 
 function appendValueTree({
   nodes,
   edges,
+  nodeSelections,
+  edgeSelections,
+  rawSelection,
   parentId,
   value,
   path,
@@ -416,6 +506,9 @@ function appendValueTree({
 }: {
   nodes: EpiphanyGraphNode[];
   edges: EpiphanyGraphEdge[];
+  nodeSelections: Map<string, RawSelection>;
+  edgeSelections: Map<string, RawSelection>;
+  rawSelection: RawSelection;
   parentId: string;
   value: unknown;
   path: string;
@@ -429,9 +522,12 @@ function appendValueTree({
     value.forEach((item, index) => {
       const childPath = `${path}[${index}]`;
       const childId = nodeId("value", `${parentId}:${childPath}`);
+      nodeSelections.set(childId, rawSelection);
       nodes.push(valueNode(childId, `[${index}]`, item, childPath));
-      edges.push(valueEdge(parentId, childId, "slot", index.toString()));
-      appendValueTree({ nodes, edges, parentId: childId, value: item, path: childPath, depth: depth + 1 });
+      const edge = valueEdge(parentId, childId, "slot", index.toString());
+      edgeSelections.set(edge.id!, rawSelection);
+      edges.push(edge);
+      appendValueTree({ nodes, edges, nodeSelections, edgeSelections, rawSelection, parentId: childId, value: item, path: childPath, depth: depth + 1 });
     });
     return;
   }
@@ -440,9 +536,12 @@ function appendValueTree({
     for (const [key, item] of Object.entries(value)) {
       const childPath = `${path}.${key}`;
       const childId = nodeId("value", `${parentId}:${childPath}`);
+      nodeSelections.set(childId, rawSelection);
       nodes.push(valueNode(childId, key, item, childPath));
-      edges.push(valueEdge(parentId, childId, "field", key));
-      appendValueTree({ nodes, edges, parentId: childId, value: item, path: childPath, depth: depth + 1 });
+      const edge = valueEdge(parentId, childId, "field", key);
+      edgeSelections.set(edge.id!, rawSelection);
+      edges.push(edge);
+      appendValueTree({ nodes, edges, nodeSelections, edgeSelections, rawSelection, parentId: childId, value: item, path: childPath, depth: depth + 1 });
     }
   }
 }
@@ -490,11 +589,17 @@ function valueStatus(value: unknown): string {
   return typeof value;
 }
 
-function emptyGraphState(): EpiphanyGraphsState {
+function emptyGraphProjection(): GraphProjection {
   return {
-    architecture: { nodes: [], edges: [] },
-    dataflow: { nodes: [], edges: [] },
-    links: [],
+    state: {
+      architecture: { nodes: [], edges: [] },
+      dataflow: { nodes: [], edges: [] },
+      links: [],
+    },
+    recordNodeIds: [],
+    catalogNodeIds: [],
+    nodeSelections: new Map(),
+    edgeSelections: new Map(),
   };
 }
 
