@@ -57,8 +57,9 @@ npm run dist:inspector
 ```
 
 Hugin is read-only. Drop a `.cc`, `.msgpack`, or `.mpack` file onto the window to
-inspect the snapshot header, schema catalog, records, and decoded MessagePack
-payload previews without registering application schemas.
+inspect the snapshot header, schema catalog, records, decoded MessagePack
+payload previews, and an EpiphanyGraph view of the file's structured data tree
+without registering application schemas.
 
 ## Example
 

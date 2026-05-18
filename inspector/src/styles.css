@@ -150,6 +150,20 @@ code {
   overflow: auto;
 }
 
+.inspector-stack {
+  display: grid;
+  gap: 14px;
+}
+
+.graph-panel {
+  min-width: 0;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  overflow: hidden;
+  background: rgba(5, 9, 13, 0.94);
+  box-shadow: 0 22px 46px rgba(0, 0, 0, 0.28);
+}
+
 .hero {
   display: grid;
   align-content: center;
