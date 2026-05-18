@@ -218,6 +218,7 @@ fn updateParticles(@builtin(global_invocation_id) id: vec3u) {
   let seed = hash(cellHashSeed + f32(companion) * 17.0);
   let cellJitter = vec2f(hash(cellHashSeed + 11.0), hash(cellHashSeed + 23.0));
   let base = (cell + cellJitter) / f32(span);
+  let sourceAlbedo = sampleAlbedo(base);
 
   var packed = samplePacked(base);
   let levelDetail = f32(level) / max(f32(activeLevel), 1.0);
@@ -276,11 +277,10 @@ fn updateParticles(@builtin(global_invocation_id) id: vec3u) {
   let flowAxis = abs(fieldVector.x - fieldVector.y);
   let heat = clamp(packed.a * 0.78 + packed.b * 0.62 + nodeHeat * 0.38 + fade * 0.18, 0.0, 1.0);
   let brass = clamp((packed.b - packed.a * 0.32) * 1.35 + flowAxis * 0.18, 0.0, 1.0);
-  let albedo = sampleAlbedo(uv);
   let cyan = vec3f(0.08 + heat * 0.28, 0.44 + heat * 0.46, 0.52 + heat * 0.62);
   let gold = vec3f(0.86, 0.58, 0.22);
   let deep = vec3f(0.02, 0.10, 0.12);
-  let albedoLift = mix(deep, albedo.rgb, clamp(albedo.a * (0.72 + heat * 0.24), 0.0, 1.0));
+  let albedoLift = mix(deep, sourceAlbedo.rgb, clamp(sourceAlbedo.a * (0.72 + heat * 0.24), 0.0, 1.0));
   let fieldTint = mix(cyan, gold, brass * 0.26);
   let rgb = mix(albedoLift, fieldTint, 0.18 + heat * 0.16);
   particle.color = vec4f(
