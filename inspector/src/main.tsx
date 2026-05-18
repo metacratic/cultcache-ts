@@ -89,7 +89,11 @@ function HuginnApp() {
       const bytes = new Uint8Array(await file.arrayBuffer());
       setInspection(inspectCultCacheBytes(file.name, bytes, file.size));
       setSelection({ record: 0, catalog: 0 });
-      setGraphSelection(null);
+      setGraphSelection({
+        kind: "node",
+        graphKey: "dataflow",
+        nodeId: "store",
+      });
       setErrorMessage("");
     } catch (error) {
       setInspection(undefined);
@@ -120,46 +124,78 @@ function HuginnApp() {
       }}
       onDrop={handleDrop}
     >
-      <section className="sidebar">
-        <div className="brand">
-          <img src={assetPath("hugin-64.png")} alt="" width="64" height="64" />
-          <div>
-            <h1>Huginn</h1>
-            <p>CultCache state inspection for <code>.cc</code> files.</p>
-          </div>
-        </div>
-        <label className="dropzone">
-          <input
-            type="file"
-            accept=".cc,.msgpack,.mpack,application/octet-stream"
-            onChange={(event) => {
-              const file = event.currentTarget.files?.item(0);
-              if (file) {
-                void inspectFile(file);
-              }
-            }}
+      {inspection
+        ? (
+          <InspectionView
+            errorMessage={errorMessage}
+            inspection={inspection}
+            graphProjection={graphProjection}
+            graphSelection={graphSelection}
+            setGraphSelection={setGraphSelection}
+            selection={selection}
+            setSelection={setSelection}
+            onInspectFile={inspectFile}
           />
-          <span className="drop-title">Drop CultCache file</span>
-          <span className="drop-copy">or choose one from disk</span>
-        </label>
-        {errorMessage ? <div className="error">{errorMessage}</div> : null}
-        {inspection ? <Summary inspection={inspection} /> : <EmptySummary />}
-      </section>
-      <section className="content">
-        {inspection
-          ? (
-            <InspectionView
-              inspection={inspection}
-              graphProjection={graphProjection}
-              graphSelection={graphSelection}
-              setGraphSelection={setGraphSelection}
-              selection={selection}
-              setSelection={setSelection}
-            />
-          )
-          : <NoFile />}
-      </section>
+        )
+        : (
+          <EmptyWorkspace
+            errorMessage={errorMessage}
+            onInspectFile={inspectFile}
+          />
+        )}
     </main>
+  );
+}
+
+function EmptyWorkspace({
+  errorMessage,
+  onInspectFile,
+}: {
+  errorMessage: string;
+  onInspectFile: (file: File) => Promise<void>;
+}) {
+  return (
+    <section className="empty-workspace">
+      <HuginnFieldCanvas imageUrl={assetPath("hugin.png")} />
+      <section className="floating-panel brand-panel is-primary">
+        <BrandBlock />
+        <FilePicker onInspectFile={onInspectFile} />
+        {errorMessage ? <div className="error">{errorMessage}</div> : null}
+        <EmptySummary />
+      </section>
+      <NoFile />
+    </section>
+  );
+}
+
+function BrandBlock() {
+  return (
+    <div className="brand">
+      <img src={assetPath("hugin-64.png")} alt="" width="64" height="64" />
+      <div>
+        <h1>Huginn</h1>
+        <p>CultCache state inspection for <code>.cc</code> files.</p>
+      </div>
+    </div>
+  );
+}
+
+function FilePicker({ onInspectFile }: { onInspectFile: (file: File) => Promise<void> }) {
+  return (
+    <label className="dropzone">
+      <input
+        type="file"
+        accept=".cc,.msgpack,.mpack,application/octet-stream"
+        onChange={(event) => {
+          const file = event.currentTarget.files?.item(0);
+          if (file) {
+            void onInspectFile(file);
+          }
+        }}
+      />
+      <span className="drop-title">Drop CultCache file</span>
+      <span className="drop-copy">or choose one from disk</span>
+    </label>
   );
 }
 
@@ -205,22 +241,42 @@ function NoFile() {
 }
 
 function InspectionView({
+  errorMessage,
   inspection,
   graphProjection,
   graphSelection,
   setGraphSelection,
   selection,
   setSelection,
+  onInspectFile,
 }: {
+  errorMessage: string;
   inspection: CultCacheInspection;
   graphProjection: GraphProjection;
   graphSelection: ViewerSelection | null;
   setGraphSelection: (selection: ViewerSelection | null) => void;
   selection: Selection;
   setSelection: (selection: Selection) => void;
+  onInspectFile: (file: File) => Promise<void>;
 }) {
   const record = inspection.records[selection.record];
   const catalogEntry = inspection.catalog[selection.catalog];
+  const expandedNode = graphSelection?.kind === "node"
+    ? {
+        graphKey: graphSelection.graphKey,
+        nodeId: graphSelection.nodeId,
+        className: "huginn-expanded-node",
+        ariaLabel: "Selected CultCache node",
+        content: (
+          <ExpandedNodePanel
+            catalogEntry={catalogEntry}
+            inspection={inspection}
+            record={record}
+            selection={selection}
+          />
+        ),
+      }
+    : undefined;
   const selectRaw = (next: RawSelection) => {
     if (next.kind === "record") {
       setSelection({ ...selection, record: next.index });
@@ -258,9 +314,10 @@ function InspectionView({
   };
 
   return (
-    <div className="inspector-stack">
+    <div className="inspector-stage">
       <section className="graph-panel">
         <EpiphanyGraphViewer
+          className="huginn-graph-shell"
           state={graphProjection.state}
           initialGraph="dataflow"
           selection={graphSelection}
@@ -270,8 +327,11 @@ function InspectionView({
           viewportBackground="#03070a"
           overlayPanels
           showSidebar={false}
+          focusSelection
+          selectionFocusMode="preview"
+          expandedNode={expandedNode}
           graphLabels={{ architecture: "File", dataflow: "Payload" }}
-          style={{ minHeight: 620 }}
+          style={{ minHeight: "100vh" }}
         />
         {graphProjection.truncatedValueNodes > 0 ? (
           <div className="graph-warning">
@@ -279,14 +339,20 @@ function InspectionView({
           </div>
         ) : null}
       </section>
-      <div className="columns">
-        <section className="panel">
-          <header><h2>Records</h2><span>{inspection.records.length}</span></header>
+      <div className="overlay-layer">
+        <section className="floating-panel brand-panel">
+          <BrandBlock />
+          <FilePicker onInspectFile={onInspectFile} />
+          {errorMessage ? <div className="error">{errorMessage}</div> : null}
+          <Summary inspection={inspection} />
+        </section>
+        <section className="floating-panel data-panel records-panel">
+          <PanelHeader title="Records" count={inspection.records.length.toString()} />
           <div className="list">
             {inspection.records.length
               ? inspection.records.map((entry, index) => (
                 <RecordButton
-                  key={`${entry.schemaId}:${entry.key}`}
+                  key={`${entry.schemaId}:${entry.key}:${index}`}
                   record={entry}
                   index={index}
                   selected={index === selection.record}
@@ -296,14 +362,8 @@ function InspectionView({
               : <div className="empty">No records</div>}
           </div>
         </section>
-        <section className="panel detail">
-          <header><h2>Record Detail</h2><span>{inspection.filePath}</span></header>
-          {record ? <RecordDetail record={record} /> : <div className="empty">No record selected</div>}
-        </section>
-      </div>
-      <div className="columns bottom">
-        <section className="panel">
-          <header><h2>Schema Catalog</h2><span>{inspection.catalog.length}</span></header>
+        <section className="floating-panel data-panel catalog-panel">
+          <PanelHeader title="Schema Catalog" count={inspection.catalog.length.toString()} />
           <div className="list">
             {inspection.catalog.length
               ? inspection.catalog.map((entry, index) => (
@@ -318,12 +378,79 @@ function InspectionView({
               : <div className="empty">No schema catalog</div>}
           </div>
         </section>
-        <section className="panel detail">
-          <header><h2>Catalog Entry</h2><span>{catalogEntry?.schemaVersion ?? ""}</span></header>
-          {catalogEntry ? <CatalogDetail entry={catalogEntry} /> : <div className="empty">No catalog entry selected</div>}
+        <section className="floating-panel detail-panel">
+          <PanelHeader title="Selected Raw View" count={record?.key ?? catalogEntry?.schemaVersion ?? ""} />
+          <div className="detail-tabs">
+            <section>
+              <h3>Record</h3>
+              {record ? <RecordDetail record={record} /> : <div className="empty">No record selected</div>}
+            </section>
+            <section>
+              <h3>Schema</h3>
+              {catalogEntry ? <CatalogDetail entry={catalogEntry} /> : <div className="empty">No catalog entry selected</div>}
+            </section>
+          </div>
         </section>
       </div>
     </div>
+  );
+}
+
+function PanelHeader({ title, count }: { title: string; count: string }) {
+  return (
+    <header>
+      <h2>{title}</h2>
+      <span>{count}</span>
+    </header>
+  );
+}
+
+function ExpandedNodePanel({
+  catalogEntry,
+  inspection,
+  record,
+  selection,
+}: {
+  catalogEntry: InspectedCatalogEntry | undefined;
+  inspection: CultCacheInspection;
+  record: InspectedRecord | undefined;
+  selection: Selection;
+}) {
+  return (
+    <article className="expanded-content">
+      <div className="expanded-kicker">CultCache Node</div>
+      <header className="expanded-header">
+        <h1>{record?.key ?? catalogEntry?.schemaName ?? inspection.filePath}</h1>
+        <div className="expanded-chips">
+          <span>{inspection.format}</span>
+          <span>{inspection.records.length} records</span>
+          <span>{inspection.catalog.length} schemas</span>
+        </div>
+      </header>
+      <section className="expanded-summary">
+        {record ? (
+          <>
+            <p>{record.schemaName} record stored at {record.storedAt} with {record.payloadBytes} payload bytes.</p>
+            {record.payloadDecodeError ? <div className="error">{record.payloadDecodeError}</div> : null}
+          </>
+        ) : (
+          <p>{inspection.filePath} contains a schema catalog and persisted MessagePack record set.</p>
+        )}
+      </section>
+      <section className="expanded-article">
+        <div>
+          <h2>Record Payload</h2>
+          {record ? <RecordDetail record={record} /> : <div className="empty">Select a record node to inspect payload data.</div>}
+        </div>
+        <div>
+          <h2>Schema Entry</h2>
+          {catalogEntry ? <CatalogDetail entry={catalogEntry} /> : <div className="empty">Select a schema node to inspect catalog data.</div>}
+        </div>
+      </section>
+      <footer className="expanded-footer">
+        Raw selection: record {selection.record + 1}, schema {selection.catalog + 1}
+      </footer>
+    </article>
   );
 }
 
@@ -341,7 +468,7 @@ function RecordButton({
   return (
     <button className="row" type="button" data-record={index} aria-selected={selected} onClick={onSelect}>
       <strong>{record.key}</strong>
-      <span>{record.schemaName} · {record.payloadBytes} bytes</span>
+      <span>{record.schemaName} - {record.payloadBytes} bytes</span>
     </button>
   );
 }
