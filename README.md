@@ -61,6 +61,13 @@ inspect the snapshot header, schema catalog, records, decoded MessagePack
 payload previews, and an EpiphanyGraph view of the file's structured data tree
 without registering application schemas.
 
+Huginn's background field uses the graph node AABB as its single world-space
+authority. The WebGPU particle pass maps each particle pair to a deterministic
+hashed quadtree cell, then lets the pair trade opacity with sine/cosine phase
+while tracing a short segment through the packed flow texture. Zooming raises
+the highest live quadtree level, so new detail appears from stable spatial
+hashes instead of by accelerating the field.
+
 ## Example
 
 ```ts

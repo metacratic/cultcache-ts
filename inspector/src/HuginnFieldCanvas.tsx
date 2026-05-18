@@ -41,7 +41,7 @@ const FIELD_SIZE = 256;
 const MAX_DEPTH = 6;
 const MIN_BRUSH_SIZE = 4;
 const ENERGY_SPLIT_THRESHOLD = 0.038;
-const PARTICLE_COUNT = new URLSearchParams(globalThis.location?.search ?? "").has("smoke") ? 24_576 : 196_608;
+const PARTICLE_COUNT = new URLSearchParams(globalThis.location?.search ?? "").has("smoke") ? 8_192 : 65_536;
 const PARTICLE_STRIDE_FLOATS = 12;
 const MAX_NODE_ENVELOPES = 96;
 
@@ -107,8 +107,50 @@ fn hash(value: f32) -> f32 {
   return fract(sin(value * 12.9898) * 43758.5453);
 }
 
-fn hash2(cell: vec2f) -> f32 {
-  return hash(dot(cell, vec2f(127.1, 311.7)));
+fn quadtreeCellsBeforeLevel(level: u32) -> u32 {
+  var total = 0u;
+  var cells = 1u;
+  for (var current = 0u; current < 8u; current = current + 1u) {
+    if (current >= level) {
+      break;
+    }
+    total = total + cells;
+    cells = cells * 4u;
+  }
+  return total;
+}
+
+fn maxQuadtreeLevelForPairs(pairCount: u32) -> u32 {
+  var level = 0u;
+  var total = 1u;
+  var cells = 1u;
+  for (var next = 1u; next < 8u; next = next + 1u) {
+    cells = cells * 4u;
+    if (total + cells > pairCount) {
+      break;
+    }
+    total = total + cells;
+    level = next;
+  }
+  return level;
+}
+
+fn quadtreeLevelForPair(pairIndex: u32, maxLevel: u32) -> u32 {
+  var level = 0u;
+  var first = 0u;
+  var cells = 1u;
+  for (var current = 0u; current < 8u; current = current + 1u) {
+    if (current > maxLevel) {
+      break;
+    }
+    if (pairIndex < first + cells) {
+      level = current;
+      break;
+    }
+    first = first + cells;
+    cells = cells * 4u;
+  }
+  return level;
 }
 
 fn wrap2(value: vec2f, size: vec2f) -> vec2f {
@@ -148,22 +190,42 @@ fn updateParticles(@builtin(global_invocation_id) id: vec3u) {
   }
 
   var particle = particles[index];
-  let canvasSize = vec2f(max(uniforms.width, 1.0), max(uniforms.height, 1.0));
-  var position = particle.position * canvasSize;
-  var uv = clamp(particle.position, vec2f(0.001), vec2f(0.999));
-  var packed = samplePacked(uv);
-  let detail = clamp(uniforms.detail, 0.65, 4.0);
-  let strengthGradient = channelGradient(uv, 3u);
-  let curvatureGradient = channelGradient(uv, 2u);
-  let tangent = normalize(vec2f(-curvatureGradient.y, curvatureGradient.x) + vec2f(0.001, 0.0));
-  let inward = normalize(strengthGradient + vec2f(0.001, 0.0));
+  let pairIndex = index / 2u;
+  let companion = index - pairIndex * 2u;
+  let pairCount = max(1u, u32(uniforms.particleCount * 0.5));
+  let pairCapacityLevel = maxQuadtreeLevelForPairs(pairCount);
+  let zoomLevel = u32(clamp(floor(log2(max(uniforms.viewScale, 0.25)) * 0.9 + uniforms.detail * 0.75 + 4.25), 2.0, 7.0));
+  let activeLevel = min(pairCapacityLevel, zoomLevel);
+  let activePairs = min(pairCount, quadtreeCellsBeforeLevel(activeLevel + 1u));
+  if (pairIndex >= activePairs) {
+    particle.color = vec4f(0.0);
+    particle.size = 0.0;
+    particles[index] = particle;
+    return;
+  }
+
+  let level = quadtreeLevelForPair(pairIndex, activeLevel);
+  let levelFirstPair = quadtreeCellsBeforeLevel(level);
+  let localPair = pairIndex - levelFirstPair;
+  let span = 1u << level;
+  let cell = vec2f(f32(localPair % span), f32(localPair / span));
+  let cellHashSeed = f32(level) * 4096.0 + cell.x * 131.0 + cell.y * 719.0;
+  let seed = hash(cellHashSeed + f32(companion) * 17.0);
+  let cellJitter = vec2f(hash(cellHashSeed + 11.0), hash(cellHashSeed + 23.0));
+  let base = (cell + cellJitter) / f32(span);
+
+  var packed = samplePacked(base);
+  let levelDetail = f32(level) / max(f32(activeLevel), 1.0);
+  let detail = clamp(uniforms.detail, 0.75, 2.0);
   let fieldVector = packed.rg * 2.0 - vec2f(1.0);
-  let fieldVelocity = fieldVector * uniforms.flowGain * (0.34 + packed.a * 2.25) * detail;
-  let turbulence = proceduralCurl(position * (0.82 + packed.b * 0.9), particle.seed) * (9.0 + packed.b * 36.0 + packed.a * 18.0) * detail;
-  let ridgeSlip = tangent * (packed.b * 30.0 + packed.a * 18.0) * detail;
-  let channelPull = inward * (packed.a * 24.0 + packed.b * 8.0);
-  let cell = floor(position / max(12.0, 38.0 / detail));
-  let jitter = vec2f(hash2(cell + particle.seed), hash2(cell + vec2f(7.0, 13.0) + particle.seed)) - vec2f(0.5);
+  let fieldDirection = normalize(fieldVector + vec2f(0.0001, 0.0));
+  let drift = fieldDirection * uniforms.time * (uniforms.flowGain / 24.0) * (0.00055 + packed.a * 0.0011 + packed.b * 0.0004) / max(f32(span), 1.0);
+  var uv = wrap2(base + drift, vec2f(1.0));
+  packed = samplePacked(uv);
+
+  let curvatureGradient = channelGradient(uv, 2u);
+  let tangent = normalize(vec2f(-curvatureGradient.y, curvatureGradient.x) + fieldDirection * 0.28 + vec2f(0.0001, 0.0));
+  let fieldBlend = normalize(fieldDirection * 0.74 + tangent * (0.26 + packed.b * 0.18));
   var nodePush = vec2f(0.0);
   var nodeHeat = 0.0;
   for (var envelopeIndex = 0u; envelopeIndex < ${MAX_NODE_ENVELOPES}u; envelopeIndex = envelopeIndex + 1u) {
@@ -176,39 +238,38 @@ fn updateParticles(@builtin(global_invocation_id) id: vec3u) {
     let normalized = dot(delta, delta) / (radius * radius);
     let edge = exp(-4.0);
     let gaussian = exp(-4.0 * normalized);
-    let influence = pow(clamp((gaussian - edge) / max(1.0 - edge, 0.000001), 0.0, 1.0), 0.78) * envelope.w * uniforms.nodeGain;
+    let influence = pow(clamp((gaussian - edge) / max(1.0 - edge, 0.000001), 0.0, 1.0), 0.92) * envelope.w * uniforms.nodeGain;
     let away = normalize(delta + vec2f(0.0001, 0.0));
     let swirl = vec2f(-away.y, away.x);
-    nodePush += (swirl * 34.0 + away * 18.0) * influence;
+    nodePush += (swirl * 0.72 + away * 0.18) * influence;
     nodeHeat += influence;
   }
 
-  let velocity = fieldVelocity + turbulence + ridgeSlip + channelPull + nodePush + jitter * (5.0 + packed.a * 18.0) * detail;
-
-  position = wrap2(position + velocity * uniforms.dt, canvasSize);
-  uv = position / canvasSize;
+  let period = 5.2 + hash(seed * 53.0) * 1.8 + levelDetail * 0.8;
+  let phase = uniforms.time / period + seed;
+  let wave = phase * 6.28318;
+  let sine = sin(wave) * 0.5 + 0.5;
+  let cosine = cos(wave) * 0.5 + 0.5;
+  let fade = select(sine * sine, cosine * cosine, companion == 1u);
+  let side = select(-1.0, 1.0, companion == 1u);
+  let shimmer = sin(wave * 1.7 + packed.b * 4.0) * 0.5 + 0.5;
+  let flowLine = normalize(fieldBlend + nodePush + proceduralCurl(uv * 54.0, seed) * 0.045);
+  let normal = vec2f(-flowLine.y, flowLine.x);
+  let worldSpan = max(max(uniforms.worldWidth, uniforms.worldHeight), 1.0);
+  let cellUv = 1.0 / max(f32(span), 1.0);
+  let linePixels = (3.0 + packed.a * 8.5 + packed.b * 4.0 + nodeHeat * 2.0) * (0.94 + detail * 0.05);
+  let lineUv = min(linePixels / worldSpan, cellUv * 0.28);
+  let trace = (side * 0.42 + (fract(phase) - 0.5) * 0.32) * lineUv;
+  let tremble = (shimmer - 0.5) * lineUv * 0.26;
+  uv = clamp(uv + flowLine * trace + normal * tremble, vec2f(0.001), vec2f(0.999));
   packed = samplePacked(uv);
 
-  let density = clamp(packed.a * 0.76 + packed.b * 0.54, 0.0, 1.0);
-  let die = hash(particle.seed * 91.7 + floor(uniforms.time * (7.0 + detail * 5.0)));
-  if (density < 0.10 && die > density + 0.34) {
-    let respawnSeed = particle.seed + uniforms.time * 0.071 + f32(index) * 0.000013;
-    let angle = respawnSeed * 6.28318;
-    let radius = sqrt(hash(respawnSeed * 31.0)) * (0.46 - min(packed.a, 0.32) * 0.28);
-    let center = vec2f(0.5) + vec2f(cos(angle), sin(angle)) * radius;
-    let micro = vec2f(hash(respawnSeed * 47.0), hash(respawnSeed * 59.0)) - vec2f(0.5);
-    uv = clamp(center + micro * (0.18 / detail), vec2f(0.001), vec2f(0.999));
-    position = uv * canvasSize;
-    packed = samplePacked(uv);
-  }
-
   particle.position = uv;
-  particle.velocity = velocity;
-  particle.life = fract(particle.life + uniforms.dt * (0.08 + packed.a * 0.18 + packed.b * 0.11 + hash(particle.seed * 23.0) * 0.07) * detail);
+  particle.velocity = flowLine * (linePixels * 0.42 + 1.0);
+  particle.life = fade;
 
-  let speed = clamp(length(velocity) / (96.0 + detail * 26.0), 0.0, 1.0);
   let flowAxis = abs(fieldVector.x - fieldVector.y);
-  let heat = clamp(packed.a * 0.92 + packed.b * 0.86 + speed * 0.48 + nodeHeat * 0.62, 0.0, 1.0);
+  let heat = clamp(packed.a * 0.78 + packed.b * 0.62 + nodeHeat * 0.38 + fade * 0.18, 0.0, 1.0);
   let brass = clamp((packed.b - packed.a * 0.32) * 1.35 + flowAxis * 0.18, 0.0, 1.0);
   let cyan = vec3f(0.08 + heat * 0.28, 0.44 + heat * 0.46, 0.52 + heat * 0.62);
   let gold = vec3f(0.86, 0.58, 0.22);
@@ -216,9 +277,9 @@ fn updateParticles(@builtin(global_invocation_id) id: vec3u) {
   let rgb = mix(mix(deep, cyan, 0.42 + heat * 0.58), gold, brass * 0.32);
   particle.color = vec4f(
     rgb,
-    uniforms.alpha * (0.004 + heat * 0.018 + density * 0.012 + nodeHeat * 0.014) * (0.72 + detail * 0.11)
+    uniforms.alpha * (0.0022 + heat * 0.008 + packed.a * 0.005 + nodeHeat * 0.0025) * fade * (0.72 + levelDetail * 0.28)
   );
-  particle.size = (0.52 + hash(particle.seed * 19.0) * 1.85) * (0.58 + packed.a * 1.25 + packed.b * 0.62 + nodeHeat * 0.44) * (0.92 + detail * 0.12) * (1.0 - abs(particle.life - 0.5) * 0.42);
+  particle.size = (0.3 + hash(seed * 19.0) * 0.68) * (0.68 + packed.a * 0.52 + packed.b * 0.24 + nodeHeat * 0.14) * (0.92 + detail * 0.035) * (0.82 + levelDetail * 0.22);
   particles[index] = particle;
 }
 `;
@@ -278,15 +339,15 @@ fn vertexMain(@builtin(vertex_index) vertexIndex: u32, @builtin(instance_index) 
   let local = corners[vertexIndex];
   let direction = normalize(particle.velocity + vec2f(0.001, 0.0));
   let tangent = vec2f(-direction.y, direction.x);
-  let stretch = clamp(length(particle.velocity) / 92.0, 0.0, 2.1);
-  let ellipse = direction * local.x * particle.size * (1.0 + stretch * 0.48) + tangent * local.y * particle.size * (0.74 + renderUniforms.detail * 0.035);
+  let stretch = clamp(length(particle.velocity) / 16.0, 0.0, 1.4);
+  let ellipse = direction * local.x * particle.size * (1.0 + stretch * 0.62) + tangent * local.y * particle.size * (0.64 + renderUniforms.detail * 0.025);
   let world = vec2f(renderUniforms.worldX, renderUniforms.worldY) + particle.position * vec2f(renderUniforms.worldWidth, renderUniforms.worldHeight);
   let viewScale = max(renderUniforms.viewScale, 0.05);
   let basePosition = vec2f(renderUniforms.viewX, renderUniforms.viewY) + world * viewScale;
   let pixelPosition = basePosition + ellipse * sqrt(viewScale);
   var out: VertexOut;
   out.position = vec4f((pixelPosition.x / renderUniforms.width) * 2.0 - 1.0, 1.0 - (pixelPosition.y / renderUniforms.height) * 2.0, 0.0, 1.0);
-  out.color = particle.color * (1.0 - abs(particle.life - 0.5) * 0.44);
+  out.color = particle.color;
   out.local = local;
   return out;
 }
@@ -659,7 +720,7 @@ async function startGpuParticleField(canvas: HTMLCanvasElement, sample: FieldSam
     const dt = Math.min(0.033, Math.max(0.001, (time - lastTime) / 1000));
     lastTime = time;
     detail += (targetDetail - detail) * Math.min(1, dt * 4.8);
-    const activeParticleCount = Math.floor(PARTICLE_COUNT * Math.min(1, 0.34 + detail * 0.22));
+    const activeParticleCount = PARTICLE_COUNT;
     const graphTransform = transformState.received
       ? transformState.current
       : {
@@ -675,11 +736,11 @@ async function startGpuParticleField(canvas: HTMLCanvasElement, sample: FieldSam
       canvas.width,
       canvas.height,
       activeParticleCount,
-      92 + detail * 62,
-      0.76,
+      18 + detail * 6,
+      0.42,
       detail,
       nodeEnvelopeState.count,
-      1.12 + detail * 0.18,
+      0.16 + detail * 0.05,
       bounds.x,
       bounds.y,
       bounds.width,
