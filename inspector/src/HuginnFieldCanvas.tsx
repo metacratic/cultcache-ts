@@ -314,14 +314,18 @@ fn updateParticles(@builtin(global_invocation_id) id: vec3u) {
   );
   let sourceAlbedo = sampleAlbedo(base);
 
-  var packed = samplePacked(base);
+  let startPacked = samplePacked(base);
+  var packed = startPacked;
   let levelDetail = f32(level) / f32(${STARDUST_MAX_LEVEL}u);
   let detail = clamp(uniforms.detail, 0.75, 2.0);
-  let fieldVector = packed.rg * 2.0 - vec2f(1.0);
+  let fieldVector = startPacked.rg * 2.0 - vec2f(1.0);
   let fieldDirection = normalize(fieldVector + vec2f(0.0001, 0.0));
   let curvatureGradient = channelGradient(base, 2u);
   let tangent = normalize(vec2f(-curvatureGradient.y, curvatureGradient.x) + fieldDirection * 0.28 + vec2f(0.0001, 0.0));
-  let fieldBlend = normalize(fieldDirection * 0.62 + tangent * (0.32 + packed.b * 0.22) + triFlow(base * 18.0 - vec2f(0.0, uniforms.time * 0.035), triSeed) * 0.22);
+  let sourceStructure = startPacked.b;
+  let sourceEmission = startPacked.a;
+  let domainNoise = triFlow(base * (14.0 + sourceStructure * 18.0) - vec2f(0.0, uniforms.time * (0.026 + sourceEmission * 0.018)), triSeed);
+  let fieldBlend = normalize(fieldDirection * (0.56 + sourceEmission * 0.18) + tangent * (0.26 + sourceStructure * 0.36) + domainNoise * (0.13 + sourceStructure * 0.27));
   var nodePush = vec2f(0.0);
   var nodeHeat = 0.0;
   for (var envelopeIndex = 0u; envelopeIndex < ${MAX_NODE_ENVELOPES}u; envelopeIndex = envelopeIndex + 1u) {
@@ -342,30 +346,36 @@ fn updateParticles(@builtin(global_invocation_id) id: vec3u) {
   }
 
   let flowLine = normalize(fieldBlend + nodePush);
-  var uv = clamp(base - flowLine * lifetime * (uniforms.flowGain / 24.0) * (0.009 + packed.a * 0.028 + packed.b * 0.012) * spacing, vec2f(0.001), vec2f(0.999));
+  var uv = clamp(base - flowLine * lifetime * (uniforms.flowGain / 24.0) * (0.009 + sourceEmission * 0.030 + sourceStructure * 0.016) * spacing, vec2f(0.001), vec2f(0.999));
   packed = samplePacked(uv);
 
   particle.position = uv;
-  particle.velocity = flowLine * (4.0 + packed.a * 9.0 + packed.b * 4.0);
+  let advectedFlow = packed.rg * 2.0 - vec2f(1.0);
+  let advectedShear = length(advectedFlow - fieldVector);
+  let emission = clamp(sourceEmission * 0.42 + packed.a * 0.78, 0.0, 1.0);
+  let structure = clamp(sourceStructure * 0.52 + packed.b * 0.62, 0.0, 1.0);
+  particle.velocity = flowLine * (3.2 + emission * 10.5 + structure * 5.4 + advectedShear * 2.2);
   particle.life = lifetime;
 
   let flowAxis = abs(fieldVector.x - fieldVector.y);
   let lifeFade = parabola(lifetime, 2.0);
   let phase = lifetime * 6.28318530718 + f32(companion) * 1.57079632679;
   let pairFade = pow(clamp(sin(phase) * 0.5 + 0.5, 0.0, 1.0), 1.35);
-  let heat = clamp(packed.a * 0.78 + packed.b * 0.62 + nodeHeat * 0.38 + lifeFade * 0.18, 0.0, 1.0);
-  let brass = clamp((packed.b - packed.a * 0.32) * 1.35 + flowAxis * 0.18, 0.0, 1.0);
-  let cyan = vec3f(0.08 + heat * 0.28, 0.44 + heat * 0.46, 0.52 + heat * 0.62);
-  let gold = vec3f(0.86, 0.58, 0.22);
-  let deep = vec3f(0.02, 0.10, 0.12);
-  let albedoLift = mix(deep, sourceAlbedo.rgb, clamp(sourceAlbedo.a * (0.72 + heat * 0.24), 0.0, 1.0));
-  let fieldTint = mix(cyan, gold, brass * 0.26);
-  let rgb = mix(albedoLift, fieldTint, 0.18 + heat * 0.16);
+  let heat = clamp(emission * 0.82 + structure * 0.48 + advectedShear * 0.22 + nodeHeat * 0.38 + lifeFade * 0.16, 0.0, 1.0);
+  let brass = clamp((structure - emission * 0.22) * 1.22 + flowAxis * 0.22, 0.0, 1.0);
+  let cyan = vec3f(0.07 + emission * 0.24, 0.40 + heat * 0.50, 0.52 + emission * 0.72);
+  let gold = vec3f(0.96, 0.65 + structure * 0.14, 0.24);
+  let violet = vec3f(0.40 + sourceAlbedo.r * 0.18, 0.14 + sourceAlbedo.g * 0.08, 0.54 + sourceAlbedo.b * 0.24);
+  let deep = vec3f(0.012, 0.052, 0.065);
+  let albedoLift = mix(deep, sourceAlbedo.rgb, clamp(sourceAlbedo.a * (0.64 + emission * 0.30 + structure * 0.16), 0.0, 1.0));
+  let fieldTint = mix(mix(cyan, gold, brass * 0.34), violet, clamp(sourceStructure * (1.0 - sourceEmission) * 0.28, 0.0, 0.28));
+  let emissiveInk = sourceAlbedo.rgb * (0.25 + emission * 0.72) + fieldTint * (0.20 + structure * 0.22);
+  let rgb = mix(albedoLift, emissiveInk, clamp(0.16 + heat * 0.28 + sourceAlbedo.a * 0.18, 0.0, 0.74));
   particle.color = vec4f(
     rgb,
-    uniforms.alpha * (0.003 + heat * 0.010 + packed.a * 0.005 + nodeHeat * 0.0025) * lifeFade * pairFade * band.weight * (0.72 + levelDetail * 0.28)
+    uniforms.alpha * (0.0022 + emission * 0.013 + structure * 0.006 + advectedShear * 0.003 + nodeHeat * 0.0025) * lifeFade * pairFade * band.weight * (0.72 + levelDetail * 0.28)
   );
-  particle.size = mix(0.24, 0.92, sizeRandom) * (0.7 + packed.a * 0.7 + packed.b * 0.28 + nodeHeat * 0.14) * (0.92 + detail * 0.035) * (0.82 + levelDetail * 0.22) * lifeFade * (0.35 + pairFade * 0.65) * (0.82 + band.weight * 0.18);
+  particle.size = mix(0.20, 0.98, sizeRandom) * (0.62 + emission * 0.82 + structure * 0.36 + advectedShear * 0.18 + nodeHeat * 0.14) * (0.92 + detail * 0.035) * (0.82 + levelDetail * 0.22) * lifeFade * (0.35 + pairFade * 0.65) * (0.82 + band.weight * 0.18);
   particles[index] = particle;
 }
 `;

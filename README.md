@@ -72,10 +72,13 @@ intersects the current screen bounds with the artwork bounds, and assigns only
 visible quadtree cells to those slots. Each visible cell is seeded with the
 Aetheria Stardust `RandomFirst` hash and xorshift follow-up sequence, then each
 particle pair trades opacity with sine/cosine phase while tracing a short
-segment through the packed flow texture. Zooming raises the live quadtree level;
-coarse cells fade down while finer cells seeded from the same spatial lattice
-fade in around them, so detail density rises without changing the field's
-identity.
+segment through the packed flow texture. The packed map uses `RG` for flow, `B`
+for structure/curvature/detail pressure, and `A` for emission/field strength;
+particle color comes from the source Huginn albedo at the starting UV so the
+flow carries brushstrokes instead of repainting them at the final sample.
+Zooming raises the live quadtree level; coarse cells fade down while finer cells
+seeded from the same spatial lattice fade in around them, so detail density
+rises without changing the field's identity.
 
 ## Example
 
