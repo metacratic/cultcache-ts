@@ -360,7 +360,7 @@ function InspectionView({
           overlayPanels
           showSidebar={false}
           focusSelection
-          selectionFocusMode="preview"
+          selectionFocusMode="article"
           expandedNode={expandedNode}
           graphLabels={{ architecture: "File", dataflow: "Payload" }}
           style={{ minHeight: "100vh" }}
