@@ -63,15 +63,19 @@ generated Huginn executable must use that package version in its filename.
 
 Huginn is read-only. Drop a `.cc`, `.msgpack`, or `.mpack` file onto the window to
 inspect the snapshot header, schema catalog, records, decoded MessagePack
-payload previews, and an EpiphanyGraph view of the file's structured data tree
+payload previews, and an EpiphanyGraph cloud of the file's structured payload data
 without registering application schemas.
 
 Huginn's background field uses the graph node AABB as its single world-space
-authority. The WebGPU particle pass maps each particle pair to a deterministic
-hashed quadtree cell, then lets the pair trade opacity with sine/cosine phase
-while tracing a short segment through the packed flow texture. Zooming raises
-the highest live quadtree level, so new detail appears from stable spatial
-hashes instead of by accelerating the field.
+authority. The WebGPU particle pass keeps a million particle slots available,
+intersects the current screen bounds with the artwork bounds, and assigns only
+visible quadtree cells to those slots. Each visible cell is seeded with the
+Aetheria Stardust `RandomFirst` hash and xorshift follow-up sequence, then each
+particle pair trades opacity with sine/cosine phase while tracing a short
+segment through the packed flow texture. Zooming raises the live quadtree level;
+coarse cells fade down while finer cells seeded from the same spatial lattice
+fade in around them, so detail density rises without changing the field's
+identity.
 
 ## Example
 

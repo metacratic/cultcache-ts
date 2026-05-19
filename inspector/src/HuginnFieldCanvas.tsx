@@ -41,9 +41,12 @@ const FIELD_SIZE = 256;
 const MAX_DEPTH = 6;
 const MIN_BRUSH_SIZE = 4;
 const ENERGY_SPLIT_THRESHOLD = 0.038;
-const PARTICLE_COUNT = new URLSearchParams(globalThis.location?.search ?? "").has("smoke") ? 8_192 : 65_536;
+const PARTICLE_COUNT = new URLSearchParams(globalThis.location?.search ?? "").has("smoke") ? 8_192 : 1_048_576;
 const PARTICLE_STRIDE_FLOATS = 12;
 const MAX_NODE_ENVELOPES = 96;
+const STARDUST_MAX_LEVEL = 13;
+const STARDUST_COARSE_PARTICLES_PER_CELL = 2;
+const STARDUST_FINE_PARTICLES_PER_CELL = 6;
 
 type NodeEnvelope = {
   id: string;
@@ -97,6 +100,17 @@ struct SimUniforms {
   pad1: f32,
 };
 
+struct VisibleBand {
+  level: u32,
+  minX: u32,
+  minY: u32,
+  cellsX: u32,
+  cellsY: u32,
+  pairCount: u32,
+  weight: f32,
+  particlesPerCell: u32,
+};
+
 @group(0) @binding(0) var<storage, read_write> particles: array<Particle>;
 @group(0) @binding(1) var<uniform> uniforms: SimUniforms;
 @group(0) @binding(2) var fieldSampler: sampler;
@@ -104,67 +118,85 @@ struct SimUniforms {
 @group(0) @binding(4) var<storage, read> nodeEnvelopes: array<vec4f>;
 @group(0) @binding(5) var albedoTexture: texture_2d<f32>;
 
-fn hash(value: f32) -> f32 {
-  return fract(sin(value * 12.9898) * 43758.5453);
+fn hash32(value: u32) -> u32 {
+  var x = value;
+  x = (x ^ 61u) ^ (x >> 16u);
+  x = x * 9u;
+  x = x ^ (x >> 4u);
+  x = x * 0x27d4eb2du;
+  x = x ^ (x >> 15u);
+  return x;
 }
 
-fn quadtreeCellsBeforeLevel(level: u32) -> u32 {
-  var total = 0u;
-  var cells = 1u;
-  for (var current = 0u; current < 8u; current = current + 1u) {
-    if (current >= level) {
-      break;
-    }
-    total = total + cells;
-    cells = cells * 4u;
+fn hashPair(a: u32, b: u32) -> u32 {
+  var x = hash32(a);
+  var y = b;
+  y = y - (y << 6u);
+  y = y ^ (x >> 17u);
+  y = y - (y << 9u);
+  y = y ^ (x << 4u);
+  y = y - (y << 3u);
+  y = y ^ (y << 10u);
+  y = y ^ (y >> 15u);
+  return x ^ y;
+}
+
+fn randomFirst(a: u32, b: u32) -> f32 {
+  return f32(hashPair(a, b) & 0x00ffffffu) / 16777216.0;
+}
+
+fn xorshift(value: u32) -> u32 {
+  var state = value;
+  state = state ^ (state << 13u);
+  state = state ^ (state >> 17u);
+  state = state ^ (state << 5u);
+  return state;
+}
+
+fn randomValue(state: u32) -> f32 {
+  return f32(state & 0x00ffffffu) / 16777216.0;
+}
+
+fn fadeCurve(t: f32) -> f32 {
+  return t * t * t * (t * (6.0 * t - 15.0) + 10.0);
+}
+
+fn grad(seed: u32, p: f32) -> f32 {
+  if ((hash32(seed) & 1u) == 0u) {
+    return p;
   }
-  return total;
+  return -p;
 }
 
-fn maxQuadtreeLevelForPairs(pairCount: u32) -> u32 {
-  var level = 0u;
-  var total = 1u;
-  var cells = 1u;
-  for (var next = 1u; next < 8u; next = next + 1u) {
-    cells = cells * 4u;
-    if (total + cells > pairCount) {
-      break;
-    }
-    total = total + cells;
-    level = next;
-  }
-  return level;
+fn perlinNoise1D(p: f32, seed: u32) -> f32 {
+  let pi = floor(p);
+  let pf = p - pi;
+  let cell = u32(max(pi, 0.0));
+  let w = fadeCurve(pf);
+  return mix(grad(cell ^ seed, pf), grad((cell + 1u) ^ seed, pf - 1.0), w) * 2.0;
 }
 
-fn quadtreeLevelForPair(pairIndex: u32, maxLevel: u32) -> u32 {
-  var level = 0u;
-  var first = 0u;
-  var cells = 1u;
-  for (var current = 0u; current < 8u; current = current + 1u) {
-    if (current > maxLevel) {
-      break;
-    }
-    if (pairIndex < first + cells) {
-      level = current;
-      break;
-    }
-    first = first + cells;
-    cells = cells * 4u;
-  }
-  return level;
+fn tri(value: f32) -> f32 {
+  return abs(fract(value) - 0.5);
 }
 
-fn wrap2(value: vec2f, size: vec2f) -> vec2f {
-  return fract(value / size) * size;
+fn tri3(point: vec3f) -> vec3f {
+  return vec3f(
+    tri(point.z + tri(point.y)),
+    tri(point.z + tri(point.x)),
+    tri(point.y + tri(point.x))
+  );
 }
 
-fn proceduralCurl(point: vec2f, seed: f32) -> vec2f {
-  let angle =
-    sin(point.x * 0.011 + uniforms.time * 0.23 + seed * 6.28318) +
-    cos(point.y * 0.017 - uniforms.time * 0.19 + seed * 4.71) +
-    sin((point.x + point.y) * 0.006 + uniforms.time * 0.11) +
-    sin(point.x * 0.041 + point.y * -0.032 + uniforms.time * 0.37 + seed);
-  return vec2f(cos(angle * 3.14159), sin(angle * 3.14159));
+fn triFlow(point: vec2f, seed: f32) -> vec2f {
+  let p1 = normalize(tri3(vec3f(point.x, seed, point.y)) * 2.0 - vec3f(1.0));
+  let p2 = normalize(tri3(vec3f(point.x, seed, point.y) * 1.6180339) * 2.0 - vec3f(1.0));
+  let c = cross(p1, p2);
+  return normalize(c.xz + vec2f(0.0001, 0.0));
+}
+
+fn parabola(x: f32, k: f32) -> f32 {
+  return pow(max(0.0, 4.0 * x * (1.0 - x)), k);
 }
 
 fn samplePacked(uv: vec2f) -> vec4f {
@@ -187,6 +219,36 @@ fn channelGradient(uv: vec2f, channel: u32) -> vec2f {
   return vec2f(right.a - left.a, down.a - up.a);
 }
 
+fn visibleUvBounds() -> vec4f {
+  let viewScale = max(uniforms.viewScale, 0.0001);
+  let worldMin = (vec2f(0.0, 0.0) - vec2f(uniforms.viewX, uniforms.viewY)) / viewScale;
+  let worldMax = (vec2f(uniforms.width, uniforms.height) - vec2f(uniforms.viewX, uniforms.viewY)) / viewScale;
+  let uvMin = clamp((worldMin - vec2f(uniforms.worldX, uniforms.worldY)) / vec2f(uniforms.worldWidth, uniforms.worldHeight), vec2f(0.0), vec2f(1.0));
+  let uvMax = clamp((worldMax - vec2f(uniforms.worldX, uniforms.worldY)) / vec2f(uniforms.worldWidth, uniforms.worldHeight), vec2f(0.0), vec2f(1.0));
+  return vec4f(min(uvMin, uvMax), max(uvMin, uvMax));
+}
+
+fn stardustLevelValue() -> f32 {
+  let screenSide = max(uniforms.worldWidth, uniforms.worldHeight) * max(uniforms.viewScale, 0.0001);
+  return clamp(log2(max(screenSide / 7.0, 1.0)) + uniforms.detail * 0.72, 4.0, f32(${STARDUST_MAX_LEVEL}));
+}
+
+fn visibleBand(level: u32, particlesPerCell: u32, weight: f32) -> VisibleBand {
+  let span = 1u << level;
+  let uv = visibleUvBounds();
+  let margin = 1.0 / f32(span);
+  let minUv = clamp(uv.xy - vec2f(margin), vec2f(0.0), vec2f(1.0));
+  let maxUv = clamp(uv.zw + vec2f(margin), vec2f(0.0), vec2f(1.0));
+  let minX = min(u32(floor(minUv.x * f32(span))), span - 1u);
+  let minY = min(u32(floor(minUv.y * f32(span))), span - 1u);
+  let maxX = min(u32(ceil(maxUv.x * f32(span))), span);
+  let maxY = min(u32(ceil(maxUv.y * f32(span))), span);
+  let cellsX = max(1u, maxX - minX);
+  let cellsY = max(1u, maxY - minY);
+  let visibleCells = cellsX * cellsY;
+  return VisibleBand(level, minX, minY, cellsX, cellsY, visibleCells * particlesPerCell, weight, particlesPerCell);
+}
+
 @compute @workgroup_size(128)
 fn updateParticles(@builtin(global_invocation_id) id: vec3u) {
   let index = id.x;
@@ -198,10 +260,15 @@ fn updateParticles(@builtin(global_invocation_id) id: vec3u) {
   let pairIndex = index / 2u;
   let companion = index - pairIndex * 2u;
   let pairCount = max(1u, u32(uniforms.particleCount * 0.5));
-  let pairCapacityLevel = maxQuadtreeLevelForPairs(pairCount);
-  let zoomLevel = u32(clamp(floor(log2(max(uniforms.viewScale, 0.25)) * 0.9 + uniforms.detail * 0.75 + 4.25), 2.0, 7.0));
-  let activeLevel = min(pairCapacityLevel, zoomLevel);
-  let activePairs = min(pairCount, quadtreeCellsBeforeLevel(activeLevel + 1u));
+  let levelValue = stardustLevelValue();
+  let coarseLevel = u32(floor(levelValue));
+  let fineLevel = min(coarseLevel + 1u, ${STARDUST_MAX_LEVEL}u);
+  let fineBlend = smoothstep(0.18, 0.86, fract(levelValue));
+  let coarseBand = visibleBand(coarseLevel, ${STARDUST_COARSE_PARTICLES_PER_CELL}u, 1.0 - fineBlend * 0.72);
+  let fineBand = visibleBand(fineLevel, ${STARDUST_FINE_PARTICLES_PER_CELL}u, fineBlend);
+  let coarsePairs = min(coarseBand.pairCount, max(1u, pairCount / 3u));
+  let finePairs = min(fineBand.pairCount, pairCount - coarsePairs);
+  let activePairs = coarsePairs + finePairs;
   if (pairIndex >= activePairs) {
     particle.color = vec4f(0.0);
     particle.size = 0.0;
@@ -209,29 +276,52 @@ fn updateParticles(@builtin(global_invocation_id) id: vec3u) {
     return;
   }
 
-  let level = quadtreeLevelForPair(pairIndex, activeLevel);
-  let levelFirstPair = quadtreeCellsBeforeLevel(level);
-  let localPair = pairIndex - levelFirstPair;
+  var band = coarseBand;
+  var localPair = pairIndex;
+  if (pairIndex >= coarsePairs) {
+    band = fineBand;
+    localPair = pairIndex - coarsePairs;
+  }
+
+  let level = band.level;
   let span = 1u << level;
-  let cell = vec2f(f32(localPair % span), f32(localPair / span));
-  let cellHashSeed = f32(level) * 4096.0 + cell.x * 131.0 + cell.y * 719.0;
-  let seed = hash(cellHashSeed + f32(companion) * 17.0);
-  let cellJitter = vec2f(hash(cellHashSeed + 11.0), hash(cellHashSeed + 23.0));
-  let base = (cell + cellJitter) / f32(span);
+  let particleInCell = localPair % band.particlesPerCell;
+  let cellOrdinal = localPair / band.particlesPerCell;
+  let cellX = band.minX + (cellOrdinal % band.cellsX);
+  let cellY = band.minY + (cellOrdinal / band.cellsX);
+  let cell = vec2f(f32(cellX), f32(cellY));
+  let offset = 65535u;
+  let seedU = hashPair(level * 73856093u + cellX * 19349663u + particleInCell * 119954089u, cellY * 83492791u + companion * 2654435761u);
+  var rngState = hashPair(cellX + offset + particleInCell * 251u, cellY + offset + level * 509u);
+  let firstRandom = randomFirst(cellX + offset + particleInCell * 251u, cellY + offset + level * 509u);
+  rngState = xorshift(rngState);
+  let period = 5.2 + randomValue(rngState) * 1.8;
+  rngState = xorshift(rngState);
+  let jitterX = perlinNoise1D(randomValue(rngState) * 1024.0, seedU ^ 17u);
+  rngState = xorshift(rngState);
+  let jitterY = perlinNoise1D(randomValue(rngState) * 1024.0, seedU ^ 29u);
+  rngState = xorshift(rngState);
+  let triSeed = randomValue(rngState);
+  rngState = xorshift(rngState);
+  let sizeRandom = randomValue(rngState);
+  let lifetime = fract(uniforms.time / period + firstRandom);
+  let spacing = 1.0 / max(f32(span), 1.0);
+  let base = clamp(
+    (cell + vec2f(0.5)) * spacing +
+      vec2f(jitterX, jitterY) * spacing * 0.58,
+    vec2f(0.001),
+    vec2f(0.999)
+  );
   let sourceAlbedo = sampleAlbedo(base);
 
   var packed = samplePacked(base);
-  let levelDetail = f32(level) / max(f32(activeLevel), 1.0);
+  let levelDetail = f32(level) / f32(${STARDUST_MAX_LEVEL}u);
   let detail = clamp(uniforms.detail, 0.75, 2.0);
   let fieldVector = packed.rg * 2.0 - vec2f(1.0);
   let fieldDirection = normalize(fieldVector + vec2f(0.0001, 0.0));
-  let drift = fieldDirection * uniforms.time * (uniforms.flowGain / 24.0) * (0.00055 + packed.a * 0.0011 + packed.b * 0.0004) / max(f32(span), 1.0);
-  var uv = wrap2(base + drift, vec2f(1.0));
-  packed = samplePacked(uv);
-
-  let curvatureGradient = channelGradient(uv, 2u);
+  let curvatureGradient = channelGradient(base, 2u);
   let tangent = normalize(vec2f(-curvatureGradient.y, curvatureGradient.x) + fieldDirection * 0.28 + vec2f(0.0001, 0.0));
-  let fieldBlend = normalize(fieldDirection * 0.74 + tangent * (0.26 + packed.b * 0.18));
+  let fieldBlend = normalize(fieldDirection * 0.62 + tangent * (0.32 + packed.b * 0.22) + triFlow(base * 18.0 - vec2f(0.0, uniforms.time * 0.035), triSeed) * 0.22);
   var nodePush = vec2f(0.0);
   var nodeHeat = 0.0;
   for (var envelopeIndex = 0u; envelopeIndex < ${MAX_NODE_ENVELOPES}u; envelopeIndex = envelopeIndex + 1u) {
@@ -239,7 +329,7 @@ fn updateParticles(@builtin(global_invocation_id) id: vec3u) {
       break;
     }
     let envelope = nodeEnvelopes[envelopeIndex];
-    let delta = uv - envelope.xy;
+    let delta = base - envelope.xy;
     let radius = max(envelope.z, 0.008);
     let normalized = dot(delta, delta) / (radius * radius);
     let edge = exp(-4.0);
@@ -251,31 +341,19 @@ fn updateParticles(@builtin(global_invocation_id) id: vec3u) {
     nodeHeat += influence;
   }
 
-  let period = 5.2 + hash(seed * 53.0) * 1.8 + levelDetail * 0.8;
-  let phase = uniforms.time / period + seed;
-  let wave = phase * 6.28318;
-  let sine = sin(wave) * 0.5 + 0.5;
-  let cosine = cos(wave) * 0.5 + 0.5;
-  let fade = select(sine * sine, cosine * cosine, companion == 1u);
-  let side = select(-1.0, 1.0, companion == 1u);
-  let shimmer = sin(wave * 1.7 + packed.b * 4.0) * 0.5 + 0.5;
-  let flowLine = normalize(fieldBlend + nodePush + proceduralCurl(uv * 54.0, seed) * 0.045);
-  let normal = vec2f(-flowLine.y, flowLine.x);
-  let worldSpan = max(max(uniforms.worldWidth, uniforms.worldHeight), 1.0);
-  let cellUv = 1.0 / max(f32(span), 1.0);
-  let linePixels = (3.0 + packed.a * 8.5 + packed.b * 4.0 + nodeHeat * 2.0) * (0.94 + detail * 0.05);
-  let lineUv = min(linePixels / worldSpan, cellUv * 0.28);
-  let trace = (side * 0.42 + (fract(phase) - 0.5) * 0.32) * lineUv;
-  let tremble = (shimmer - 0.5) * lineUv * 0.26;
-  uv = clamp(uv + flowLine * trace + normal * tremble, vec2f(0.001), vec2f(0.999));
+  let flowLine = normalize(fieldBlend + nodePush);
+  var uv = clamp(base - flowLine * lifetime * (uniforms.flowGain / 24.0) * (0.009 + packed.a * 0.028 + packed.b * 0.012) * spacing, vec2f(0.001), vec2f(0.999));
   packed = samplePacked(uv);
 
   particle.position = uv;
-  particle.velocity = flowLine * (linePixels * 0.42 + 1.0);
-  particle.life = fade;
+  particle.velocity = flowLine * (4.0 + packed.a * 9.0 + packed.b * 4.0);
+  particle.life = lifetime;
 
   let flowAxis = abs(fieldVector.x - fieldVector.y);
-  let heat = clamp(packed.a * 0.78 + packed.b * 0.62 + nodeHeat * 0.38 + fade * 0.18, 0.0, 1.0);
+  let lifeFade = parabola(lifetime, 2.0);
+  let phase = lifetime * 6.28318530718 + f32(companion) * 1.57079632679;
+  let pairFade = pow(clamp(sin(phase) * 0.5 + 0.5, 0.0, 1.0), 1.35);
+  let heat = clamp(packed.a * 0.78 + packed.b * 0.62 + nodeHeat * 0.38 + lifeFade * 0.18, 0.0, 1.0);
   let brass = clamp((packed.b - packed.a * 0.32) * 1.35 + flowAxis * 0.18, 0.0, 1.0);
   let cyan = vec3f(0.08 + heat * 0.28, 0.44 + heat * 0.46, 0.52 + heat * 0.62);
   let gold = vec3f(0.86, 0.58, 0.22);
@@ -285,9 +363,9 @@ fn updateParticles(@builtin(global_invocation_id) id: vec3u) {
   let rgb = mix(albedoLift, fieldTint, 0.18 + heat * 0.16);
   particle.color = vec4f(
     rgb,
-    uniforms.alpha * (0.0022 + heat * 0.008 + packed.a * 0.005 + nodeHeat * 0.0025) * fade * (0.72 + levelDetail * 0.28)
+    uniforms.alpha * (0.003 + heat * 0.010 + packed.a * 0.005 + nodeHeat * 0.0025) * lifeFade * pairFade * band.weight * (0.72 + levelDetail * 0.28)
   );
-  particle.size = (0.3 + hash(seed * 19.0) * 0.68) * (0.68 + packed.a * 0.52 + packed.b * 0.24 + nodeHeat * 0.14) * (0.92 + detail * 0.035) * (0.82 + levelDetail * 0.22);
+  particle.size = mix(0.24, 0.92, sizeRandom) * (0.7 + packed.a * 0.7 + packed.b * 0.28 + nodeHeat * 0.14) * (0.92 + detail * 0.035) * (0.82 + levelDetail * 0.22) * lifeFade * (0.35 + pairFade * 0.65) * (0.82 + band.weight * 0.18);
   particles[index] = particle;
 }
 `;
@@ -740,7 +818,6 @@ async function startGpuParticleField(canvas: HTMLCanvasElement, sample: FieldSam
     const dt = Math.min(0.033, Math.max(0.001, (time - lastTime) / 1000));
     lastTime = time;
     detail += (targetDetail - detail) * Math.min(1, dt * 4.8);
-    const activeParticleCount = PARTICLE_COUNT;
     const graphTransform = transformState.received
       ? transformState.current
       : {
@@ -750,6 +827,7 @@ async function startGpuParticleField(canvas: HTMLCanvasElement, sample: FieldSam
           bounds: { x: 0, y: 0, width: canvas.width, height: canvas.height },
         };
     const bounds = fitArtworkBounds(graphTransform.bounds);
+    const activeParticleCount = estimateVisibleParticleCount(graphTransform, bounds, canvas, detail, PARTICLE_COUNT);
     device.queue.writeBuffer(uniformBuffer, 0, new Float32Array([
       time / 1000,
       dt,
@@ -959,6 +1037,58 @@ function fitArtworkBounds(bounds: GraphViewportTransform["bounds"]) {
     width: side,
     height: side,
   };
+}
+
+function estimateVisibleParticleCount(
+  transform: GraphViewportTransform,
+  bounds: ReturnType<typeof fitArtworkBounds>,
+  canvas: HTMLCanvasElement,
+  detail: number,
+  capacity: number,
+): number {
+  const pairCapacity = Math.max(1, Math.floor(capacity / 2));
+  const levelValue = stardustLevelValue(transform, bounds, detail);
+  const coarseLevel = Math.floor(levelValue);
+  const fineLevel = Math.min(coarseLevel + 1, STARDUST_MAX_LEVEL);
+  const coarsePairs = visibleCellCount(transform, bounds, canvas, coarseLevel) * STARDUST_COARSE_PARTICLES_PER_CELL;
+  const finePairs = visibleCellCount(transform, bounds, canvas, fineLevel) * STARDUST_FINE_PARTICLES_PER_CELL;
+  const reservedCoarsePairs = Math.min(coarsePairs, Math.max(1, Math.floor(pairCapacity / 3)));
+  const reservedFinePairs = Math.min(finePairs, pairCapacity - reservedCoarsePairs);
+  const activePairs = Math.max(1, reservedCoarsePairs + reservedFinePairs);
+  return Math.min(capacity, activePairs * 2);
+}
+
+function stardustLevelValue(
+  transform: GraphViewportTransform,
+  bounds: ReturnType<typeof fitArtworkBounds>,
+  detail: number,
+): number {
+  const screenSide = Math.max(bounds.width, bounds.height) * Math.max(transform.scale, 0.0001);
+  return Math.max(4, Math.min(STARDUST_MAX_LEVEL, Math.log2(Math.max(screenSide / 7, 1)) + detail * 0.72));
+}
+
+function visibleCellCount(
+  transform: GraphViewportTransform,
+  bounds: ReturnType<typeof fitArtworkBounds>,
+  canvas: HTMLCanvasElement,
+  level: number,
+): number {
+  const scale = Math.max(transform.scale, 0.0001);
+  const worldMinX = (0 - transform.x) / scale;
+  const worldMinY = (0 - transform.y) / scale;
+  const worldMaxX = (canvas.width - transform.x) / scale;
+  const worldMaxY = (canvas.height - transform.y) / scale;
+  const uvMinX = clamp01((Math.min(worldMinX, worldMaxX) - bounds.x) / bounds.width);
+  const uvMinY = clamp01((Math.min(worldMinY, worldMaxY) - bounds.y) / bounds.height);
+  const uvMaxX = clamp01((Math.max(worldMinX, worldMaxX) - bounds.x) / bounds.width);
+  const uvMaxY = clamp01((Math.max(worldMinY, worldMaxY) - bounds.y) / bounds.height);
+  const span = 1 << level;
+  const margin = 1 / span;
+  const minX = Math.min(span - 1, Math.floor(Math.max(0, uvMinX - margin) * span));
+  const minY = Math.min(span - 1, Math.floor(Math.max(0, uvMinY - margin) * span));
+  const maxX = Math.min(span, Math.ceil(Math.min(1, uvMaxX + margin) * span));
+  const maxY = Math.min(span, Math.ceil(Math.min(1, uvMaxY + margin) * span));
+  return Math.max(1, maxX - minX) * Math.max(1, maxY - minY);
 }
 
 function resizeGpuCanvas(canvas: HTMLCanvasElement): void {

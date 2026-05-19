@@ -8,17 +8,15 @@ import "./styles.css";
 
 type Selection = {
   record: number;
-  catalog: number;
 };
 
 type RawSelection =
   | { kind: "record"; index: number }
-  | { kind: "catalog"; index: number };
+  | { kind: "value"; recordIndex: number; path: string; value: unknown };
 
 type GraphProjection = {
   state: EpiphanyGraphsState;
   recordNodeIds: string[];
-  catalogNodeIds: string[];
   nodeSelections: Map<string, RawSelection>;
   edgeSelections: Map<string, RawSelection>;
   truncatedValueNodes: number;
@@ -30,7 +28,7 @@ type TerrainTexture = {
   rgba: Uint8ClampedArray;
 };
 
-const MAX_EXPANDED_VALUE_NODES = 320;
+const MAX_EXPANDED_VALUE_NODES = 960;
 const assetPath = (name: string) => `${import.meta.env.BASE_URL}${name}`;
 const HUGINN_ART = {
   surface: assetPath("huginn-surface.png"),
@@ -93,25 +91,28 @@ createRoot(app).render(
 
 function HuginnApp() {
   const [inspection, setInspection] = useState<CultCacheInspection | undefined>();
-  const [selection, setSelection] = useState<Selection>({ record: 0, catalog: 0 });
+  const [selection, setSelection] = useState<Selection>({ record: 0 });
   const [graphSelection, setGraphSelection] = useState<ViewerSelection | null>(null);
   const [errorMessage, setErrorMessage] = useState("");
   const [dragging, setDragging] = useState(false);
 
   const graphProjection = useMemo(
-    () => inspection ? buildGraphProjection(inspection, selection.record) : emptyGraphProjection(),
-    [inspection, selection.record],
+    () => inspection ? buildGraphProjection(inspection) : emptyGraphProjection(),
+    [inspection],
   );
 
   async function inspectFile(file: File): Promise<void> {
     try {
       const bytes = new Uint8Array(await file.arrayBuffer());
-      setInspection(inspectCultCacheBytes(file.name, bytes, file.size));
-      setSelection({ record: 0, catalog: 0 });
+      const nextInspection = inspectCultCacheBytes(file.name, bytes, file.size);
+      setInspection(nextInspection);
+      setSelection({ record: 0 });
       setGraphSelection({
         kind: "node",
         graphKey: "dataflow",
-        nodeId: "store",
+        nodeId: nextInspection.records[0]
+          ? recordNodeId(nextInspection.records[0], 0)
+          : "store",
       });
       setErrorMessage("");
     } catch (error) {
@@ -279,8 +280,6 @@ function InspectionView({
   onInspectFile: (file: File) => Promise<void>;
 }) {
   const terrainForces = useHuginnTerrainForces(HUGINN_ART.field);
-  const record = inspection.records[selection.record];
-  const catalogEntry = inspection.catalog[selection.catalog];
   const expandedRawSelection = graphSelection?.kind === "node"
     ? graphProjection.nodeSelections.get(graphSelection.nodeId)
     : graphSelection?.kind === "edge"
@@ -288,9 +287,17 @@ function InspectionView({
       : undefined;
   const expandedRecord = expandedRawSelection?.kind === "record"
     ? inspection.records[expandedRawSelection.index]
+    : expandedRawSelection?.kind === "value"
+      ? inspection.records[expandedRawSelection.recordIndex]
+      : undefined;
+  const expandedValue = expandedRawSelection?.kind === "value"
+    ? {
+        path: expandedRawSelection.path,
+        value: expandedRawSelection.value,
+      }
     : undefined;
-  const expandedCatalogEntry = expandedRawSelection?.kind === "catalog"
-    ? inspection.catalog[expandedRawSelection.index]
+  const expandedCatalogEntry = expandedRecord
+    ? inspection.catalog.find((entry) => entry.schemaId === expandedRecord.schemaId)
     : undefined;
   const expandedNode = graphSelection?.kind === "node"
     ? {
@@ -301,29 +308,19 @@ function InspectionView({
         content: (
           <ExpandedNodePanel
             catalogEntry={expandedCatalogEntry}
+            expandedValue={expandedValue}
             inspection={inspection}
             record={expandedRecord}
-            selection={selection}
           />
         ),
       }
     : undefined;
-  const selectRaw = (next: RawSelection) => {
-    if (next.kind === "record") {
-      setSelection({ ...selection, record: next.index });
-      setGraphSelection({
-        kind: "node",
-        graphKey: "dataflow",
-        nodeId: graphProjection.recordNodeIds[next.index],
-      });
-      return;
-    }
-
-    setSelection({ ...selection, catalog: next.index });
+  const selectRaw = (next: Extract<RawSelection, { kind: "record" }>) => {
+    setSelection({ record: next.index });
     setGraphSelection({
       kind: "node",
       graphKey: "dataflow",
-      nodeId: graphProjection.catalogNodeIds[next.index],
+      nodeId: graphProjection.recordNodeIds[next.index],
     });
   };
   const selectGraph = (next: ViewerSelection | null) => {
@@ -339,9 +336,14 @@ function InspectionView({
       return;
     }
 
-    setSelection(rawSelection.kind === "record"
-      ? { ...selection, record: rawSelection.index }
-      : { ...selection, catalog: rawSelection.index });
+    if (rawSelection.kind === "record") {
+      setSelection({ record: rawSelection.index });
+      return;
+    }
+    if (rawSelection.kind === "value") {
+      setSelection({ record: rawSelection.recordIndex });
+      return;
+    }
   };
 
   return (
@@ -362,12 +364,12 @@ function InspectionView({
           focusSelection
           selectionFocusMode="article"
           expandedNode={expandedNode}
-          graphLabels={{ architecture: "File", dataflow: "Payload" }}
+          graphLabels={{ architecture: "File", dataflow: "Payload Cloud" }}
           style={{ minHeight: "100vh" }}
         />
         {graphProjection.truncatedValueNodes > 0 ? (
           <div className="graph-warning">
-            Payload tree clipped after {MAX_EXPANDED_VALUE_NODES} value nodes; {graphProjection.truncatedValueNodes} deeper node(s) omitted from the graph. Raw payload detail remains below.
+            Payload cloud clipped after {MAX_EXPANDED_VALUE_NODES} value nodes; {graphProjection.truncatedValueNodes} deeper node(s) omitted from the graph. Raw payload detail remains in the expanded record panel.
           </div>
         ) : null}
       </section>
@@ -392,35 +394,6 @@ function InspectionView({
                 />
               ))
               : <div className="empty">No records</div>}
-          </div>
-        </section>
-        <section className="floating-panel data-panel catalog-panel">
-          <PanelHeader title="Schema Catalog" count={inspection.catalog.length.toString()} />
-          <div className="list">
-            {inspection.catalog.length
-              ? inspection.catalog.map((entry, index) => (
-                <CatalogButton
-                  key={entry.schemaId}
-                  entry={entry}
-                  index={index}
-                  selected={index === selection.catalog}
-                  onSelect={() => selectRaw({ kind: "catalog", index })}
-                />
-              ))
-              : <div className="empty">No schema catalog</div>}
-          </div>
-        </section>
-        <section className="floating-panel detail-panel">
-          <PanelHeader title="Selected Raw View" count={record?.key ?? catalogEntry?.schemaVersion ?? ""} />
-          <div className="detail-tabs">
-            <section>
-              <h3>Record</h3>
-              {record ? <RecordDetail record={record} /> : <div className="empty">No record selected</div>}
-            </section>
-            <section>
-              <h3>Schema</h3>
-              {catalogEntry ? <CatalogDetail entry={catalogEntry} /> : <div className="empty">No catalog entry selected</div>}
-            </section>
           </div>
         </section>
       </div>
@@ -531,29 +504,34 @@ function PanelHeader({ title, count }: { title: string; count: string }) {
 
 function ExpandedNodePanel({
   catalogEntry,
+  expandedValue,
   inspection,
   record,
-  selection,
 }: {
   catalogEntry: InspectedCatalogEntry | undefined;
+  expandedValue: { path: string; value: unknown } | undefined;
   inspection: CultCacheInspection;
   record: InspectedRecord | undefined;
-  selection: Selection;
 }) {
-  const title = record?.key ?? catalogEntry?.schemaName ?? inspection.filePath;
+  const title = expandedValue?.path ?? record?.key ?? catalogEntry?.schemaName ?? inspection.filePath;
+  const payloadValue = expandedValue?.value ?? record?.payloadPreview;
   return (
     <article className="expanded-content">
-      <div className="expanded-kicker">CultCache Node</div>
+      <div className="expanded-kicker">{expandedValue ? "Payload Value" : "CultCache Node"}</div>
       <header className="expanded-header">
         <h1>{title}</h1>
         <div className="expanded-chips">
           <span>{inspection.format}</span>
           {record ? <span>{record.schemaName}</span> : <span>{inspection.records.length} records</span>}
-          {record ? <span>{record.payloadBytes} bytes</span> : <span>{inspection.catalog.length} schemas</span>}
+          {expandedValue
+            ? <span>{valueStatus(expandedValue.value)}</span>
+            : record ? <span>{record.payloadBytes} bytes</span> : <span>{inspection.catalog.length} schemas</span>}
         </div>
       </header>
       <section className="expanded-summary">
-        {record ? (
+        {expandedValue && record ? (
+          <p>{expandedValue.path} inside {record.key}.</p>
+        ) : record ? (
           <>
             <p>{record.schemaName} record stored at {record.storedAt}.</p>
             {record.payloadDecodeError ? <div className="error">{record.payloadDecodeError}</div> : null}
@@ -562,10 +540,10 @@ function ExpandedNodePanel({
           <p>{inspection.filePath} contains a schema catalog and persisted MessagePack record set.</p>
         )}
       </section>
-      {record ? (
+      {payloadValue !== undefined ? (
         <section className="expanded-payload">
           <h2>Payload</h2>
-          <RecordPayload record={record} />
+          <PayloadCode value={payloadValue} />
         </section>
       ) : null}
       <section className="expanded-article">
@@ -579,7 +557,7 @@ function ExpandedNodePanel({
         </div>
       </section>
       <footer className="expanded-footer">
-        Raw selection: record {selection.record + 1}, schema {selection.catalog + 1}
+        Record {record ? inspection.records.indexOf(record) + 1 : "-"} of {inspection.records.length}
       </footer>
     </article>
   );
@@ -604,35 +582,6 @@ function RecordButton({
   );
 }
 
-function CatalogButton({
-  entry,
-  index,
-  selected,
-  onSelect,
-}: {
-  entry: InspectedCatalogEntry;
-  index: number;
-  selected: boolean;
-  onSelect: () => void;
-}) {
-  return (
-    <button className="row" type="button" data-catalog={index} aria-selected={selected} onClick={onSelect}>
-      <strong>{entry.schemaName}</strong>
-      <span>{entry.schemaId}</span>
-    </button>
-  );
-}
-
-function RecordDetail({ record }: { record: InspectedRecord }) {
-  return (
-    <>
-      <RecordFacts record={record} />
-      {record.payloadDecodeError ? <div className="error">{record.payloadDecodeError}</div> : null}
-      <RecordPayload record={record} />
-    </>
-  );
-}
-
 function RecordFacts({ record }: { record: InspectedRecord }) {
   return (
     <Facts rows={[
@@ -645,9 +594,9 @@ function RecordFacts({ record }: { record: InspectedRecord }) {
   );
 }
 
-function RecordPayload({ record }: { record: InspectedRecord }) {
+function PayloadCode({ value }: { value: unknown }) {
   return (
-    <pre className="payload-code">{JSON.stringify(record.payloadPreview, null, 2)}</pre>
+    <pre className="payload-code">{JSON.stringify(value, null, 2)}</pre>
   );
 }
 
@@ -682,11 +631,10 @@ function Facts({ rows }: { rows: Array<[string, string]> }) {
   );
 }
 
-function buildGraphProjection(inspection: CultCacheInspection, expandedRecordIndex: number): GraphProjection {
+function buildGraphProjection(inspection: CultCacheInspection): GraphProjection {
   const dataflowNodes: EpiphanyGraphNode[] = [];
   const dataflowEdges: EpiphanyGraphEdge[] = [];
   const recordNodeIds: string[] = [];
-  const catalogNodeIds: string[] = [];
   const nodeSelections = new Map<string, RawSelection>();
   const edgeSelections = new Map<string, RawSelection>();
   const budget = {
@@ -734,80 +682,48 @@ function buildGraphProjection(inspection: CultCacheInspection, expandedRecordInd
   dataflowNodes.push({
     id: "store",
     title: ".cc Store",
-    purpose: `Root ${inspection.format} snapshot.`,
+    purpose: `Payload cloud for ${inspection.format} snapshot.`,
     mechanism: inspection.filePath,
     status: `${inspection.fileSizeBytes} bytes`,
   });
-
-  for (const [catalogIndex, entry] of inspection.catalog.entries()) {
-    const schemaNodeId = nodeId("schema", entry.schemaId);
-    catalogNodeIds[catalogIndex] = schemaNodeId;
-    nodeSelections.set(schemaNodeId, { kind: "catalog", index: catalogIndex });
-    dataflowNodes.push({
-      id: schemaNodeId,
-      title: entry.schemaName,
-      purpose: `Schema ${entry.schemaVersion} with ${entry.members.length} declared slot(s).`,
-      mechanism: entry.contentHash,
-      status: "schema",
-    });
-    const catalogEdgeId = edgeId("store", schemaNodeId, "catalogs");
-    edgeSelections.set(catalogEdgeId, { kind: "catalog", index: catalogIndex });
-    dataflowEdges.push({
-      id: catalogEdgeId,
-      source_id: "store",
-      target_id: schemaNodeId,
-      kind: "catalogs",
-      label: "catalog",
-    });
-  }
-
   inspection.records.forEach((record, recordIndex) => {
-    const recordNodeId = nodeId("record", `${record.schemaId}:${record.key}:${recordIndex}`);
-    const schemaNodeId = nodeId("schema", record.schemaId);
-    recordNodeIds[recordIndex] = recordNodeId;
-    nodeSelections.set(recordNodeId, { kind: "record", index: recordIndex });
+    const currentRecordNodeId = recordNodeId(record, recordIndex);
+    const recordSelection: RawSelection = { kind: "record", index: recordIndex };
+    const perRecordBudget = {
+      remainingValueNodes: Math.max(24, Math.floor(MAX_EXPANDED_VALUE_NODES / Math.max(1, inspection.records.length))),
+      truncatedValueNodes: 0,
+    };
+    recordNodeIds[recordIndex] = currentRecordNodeId;
+    nodeSelections.set(currentRecordNodeId, recordSelection);
     dataflowNodes.push({
-      id: recordNodeId,
+      id: currentRecordNodeId,
       title: record.key,
-      purpose: `Document record for ${record.schemaName}.`,
-      mechanism: `${record.payloadBytes} payload bytes stored at ${record.storedAt}`,
-      status: "record",
+      purpose: valuePurpose(record.payloadPreview),
+      mechanism: record.schemaName,
+      status: `${record.payloadBytes} bytes`,
     });
-    const recordEdgeId = edgeId("store", recordNodeId, "contains");
-    edgeSelections.set(recordEdgeId, { kind: "record", index: recordIndex });
+    const recordEdgeId = edgeId("store", currentRecordNodeId, "contains");
+    edgeSelections.set(recordEdgeId, recordSelection);
     dataflowEdges.push({
       id: recordEdgeId,
       source_id: "store",
-      target_id: recordNodeId,
+      target_id: currentRecordNodeId,
       kind: "contains",
       label: "record",
     });
-    if (dataflowNodes.some((node) => node.id === schemaNodeId)) {
-      const schemaEdgeId = edgeId(recordNodeId, schemaNodeId, "uses-schema");
-      edgeSelections.set(schemaEdgeId, { kind: "record", index: recordIndex });
-      dataflowEdges.push({
-        id: schemaEdgeId,
-        source_id: recordNodeId,
-        target_id: schemaNodeId,
-        kind: "uses-schema",
-        label: "schema",
-      });
-    }
-
-    if (recordIndex === expandedRecordIndex) {
-      appendValueTree({
-        nodes: dataflowNodes,
-        edges: dataflowEdges,
-        nodeSelections,
-        edgeSelections,
-        rawSelection: { kind: "record", index: recordIndex },
-        parentId: recordNodeId,
-        value: record.payloadPreview,
-        path: "payload",
-        depth: 0,
-        budget,
-      });
-    }
+    appendValueTree({
+      nodes: dataflowNodes,
+      edges: dataflowEdges,
+      nodeSelections,
+      edgeSelections,
+      recordIndex,
+      parentId: currentRecordNodeId,
+      value: record.payloadPreview,
+      path: "payload",
+      depth: 0,
+      budget: perRecordBudget,
+    });
+    budget.truncatedValueNodes += perRecordBudget.truncatedValueNodes;
   });
 
   return {
@@ -817,7 +733,6 @@ function buildGraphProjection(inspection: CultCacheInspection, expandedRecordInd
       links: [],
     },
     recordNodeIds,
-    catalogNodeIds,
     nodeSelections,
     edgeSelections,
     truncatedValueNodes: budget.truncatedValueNodes,
@@ -829,7 +744,7 @@ function appendValueTree({
   edges,
   nodeSelections,
   edgeSelections,
-  rawSelection,
+  recordIndex,
   parentId,
   value,
   path,
@@ -840,7 +755,7 @@ function appendValueTree({
   edges: EpiphanyGraphEdge[];
   nodeSelections: Map<string, RawSelection>;
   edgeSelections: Map<string, RawSelection>;
-  rawSelection: RawSelection;
+  recordIndex: number;
   parentId: string;
   value: unknown;
   path: string;
@@ -859,12 +774,13 @@ function appendValueTree({
       }
       const childPath = `${path}[${index}]`;
       const childId = nodeId("value", `${parentId}:${childPath}`);
+      const rawSelection: RawSelection = { kind: "value", recordIndex, path: childPath, value: item };
       nodeSelections.set(childId, rawSelection);
       nodes.push(valueNode(childId, `[${index}]`, item, childPath));
       const edge = valueEdge(parentId, childId, "slot", index.toString());
       edgeSelections.set(edge.id!, rawSelection);
       edges.push(edge);
-      appendValueTree({ nodes, edges, nodeSelections, edgeSelections, rawSelection, parentId: childId, value: item, path: childPath, depth: depth + 1, budget });
+      appendValueTree({ nodes, edges, nodeSelections, edgeSelections, recordIndex, parentId: childId, value: item, path: childPath, depth: depth + 1, budget });
     });
     return;
   }
@@ -876,12 +792,13 @@ function appendValueTree({
       }
       const childPath = `${path}.${key}`;
       const childId = nodeId("value", `${parentId}:${childPath}`);
+      const rawSelection: RawSelection = { kind: "value", recordIndex, path: childPath, value: item };
       nodeSelections.set(childId, rawSelection);
       nodes.push(valueNode(childId, key, item, childPath));
       const edge = valueEdge(parentId, childId, "field", key);
       edgeSelections.set(edge.id!, rawSelection);
       edges.push(edge);
-      appendValueTree({ nodes, edges, nodeSelections, edgeSelections, rawSelection, parentId: childId, value: item, path: childPath, depth: depth + 1, budget });
+      appendValueTree({ nodes, edges, nodeSelections, edgeSelections, recordIndex, parentId: childId, value: item, path: childPath, depth: depth + 1, budget });
     }
   }
 }
@@ -912,11 +829,27 @@ function countExpandableChildren(value: unknown): number {
 function valueNode(id: string, title: string, value: unknown, path: string): EpiphanyGraphNode {
   return {
     id,
-    title,
+    title: valueTitle(title, value),
     purpose: valuePurpose(value),
     mechanism: path,
     status: valueStatus(value),
   };
+}
+
+function valueTitle(title: string, value: unknown): string {
+  if (Array.isArray(value) || isPlainObject(value)) {
+    return title;
+  }
+  if (value === null) {
+    return `${title}: null`;
+  }
+  const rendered = typeof value === "string" ? value : JSON.stringify(value) ?? String(value);
+  const compact = rendered.length > 72 ? `${rendered.slice(0, 69)}...` : rendered;
+  return `${title}: ${compact}`;
+}
+
+function recordNodeId(record: InspectedRecord, index: number): string {
+  return nodeId("record", `${record.schemaId}:${record.key}:${index}`);
 }
 
 function valueEdge(sourceId: string, targetId: string, kind: string, label: string): EpiphanyGraphEdge {
@@ -960,7 +893,6 @@ function emptyGraphProjection(): GraphProjection {
       links: [],
     },
     recordNodeIds: [],
-    catalogNodeIds: [],
     nodeSelections: new Map(),
     edgeSelections: new Map(),
     truncatedValueNodes: 0,
