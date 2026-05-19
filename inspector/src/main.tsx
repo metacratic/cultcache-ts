@@ -281,6 +281,17 @@ function InspectionView({
   const terrainForces = useHuginnTerrainForces(HUGINN_ART.field);
   const record = inspection.records[selection.record];
   const catalogEntry = inspection.catalog[selection.catalog];
+  const expandedRawSelection = graphSelection?.kind === "node"
+    ? graphProjection.nodeSelections.get(graphSelection.nodeId)
+    : graphSelection?.kind === "edge"
+      ? graphProjection.edgeSelections.get(graphSelection.edgeId)
+      : undefined;
+  const expandedRecord = expandedRawSelection?.kind === "record"
+    ? inspection.records[expandedRawSelection.index]
+    : undefined;
+  const expandedCatalogEntry = expandedRawSelection?.kind === "catalog"
+    ? inspection.catalog[expandedRawSelection.index]
+    : undefined;
   const expandedNode = graphSelection?.kind === "node"
     ? {
         graphKey: graphSelection.graphKey,
@@ -289,9 +300,9 @@ function InspectionView({
         ariaLabel: "Selected CultCache node",
         content: (
           <ExpandedNodePanel
-            catalogEntry={catalogEntry}
+            catalogEntry={expandedCatalogEntry}
             inspection={inspection}
-            record={record}
+            record={expandedRecord}
             selection={selection}
           />
         ),
@@ -529,31 +540,38 @@ function ExpandedNodePanel({
   record: InspectedRecord | undefined;
   selection: Selection;
 }) {
+  const title = record?.key ?? catalogEntry?.schemaName ?? inspection.filePath;
   return (
     <article className="expanded-content">
       <div className="expanded-kicker">CultCache Node</div>
       <header className="expanded-header">
-        <h1>{record?.key ?? catalogEntry?.schemaName ?? inspection.filePath}</h1>
+        <h1>{title}</h1>
         <div className="expanded-chips">
           <span>{inspection.format}</span>
-          <span>{inspection.records.length} records</span>
-          <span>{inspection.catalog.length} schemas</span>
+          {record ? <span>{record.schemaName}</span> : <span>{inspection.records.length} records</span>}
+          {record ? <span>{record.payloadBytes} bytes</span> : <span>{inspection.catalog.length} schemas</span>}
         </div>
       </header>
       <section className="expanded-summary">
         {record ? (
           <>
-            <p>{record.schemaName} record stored at {record.storedAt} with {record.payloadBytes} payload bytes.</p>
+            <p>{record.schemaName} record stored at {record.storedAt}.</p>
             {record.payloadDecodeError ? <div className="error">{record.payloadDecodeError}</div> : null}
           </>
         ) : (
           <p>{inspection.filePath} contains a schema catalog and persisted MessagePack record set.</p>
         )}
       </section>
+      {record ? (
+        <section className="expanded-payload">
+          <h2>Payload</h2>
+          <RecordPayload record={record} />
+        </section>
+      ) : null}
       <section className="expanded-article">
         <div>
-          <h2>Record Payload</h2>
-          {record ? <RecordDetail record={record} /> : <div className="empty">Select a record node to inspect payload data.</div>}
+          <h2>Record Metadata</h2>
+          {record ? <RecordFacts record={record} /> : <div className="empty">Select a record node to inspect payload data.</div>}
         </div>
         <div>
           <h2>Schema Entry</h2>
@@ -608,16 +626,28 @@ function CatalogButton({
 function RecordDetail({ record }: { record: InspectedRecord }) {
   return (
     <>
-      <Facts rows={[
-        ["Key", record.key],
-        ["Schema", record.schemaName],
-        ["Schema ID", record.schemaId],
-        ["Stored", record.storedAt],
-        ["Payload", `${record.payloadBytes} bytes`],
-      ]} />
+      <RecordFacts record={record} />
       {record.payloadDecodeError ? <div className="error">{record.payloadDecodeError}</div> : null}
-      <pre>{JSON.stringify(record.payloadPreview, null, 2)}</pre>
+      <RecordPayload record={record} />
     </>
+  );
+}
+
+function RecordFacts({ record }: { record: InspectedRecord }) {
+  return (
+    <Facts rows={[
+      ["Key", record.key],
+      ["Schema", record.schemaName],
+      ["Schema ID", record.schemaId],
+      ["Stored", record.storedAt],
+      ["Payload", `${record.payloadBytes} bytes`],
+    ]} />
+  );
+}
+
+function RecordPayload({ record }: { record: InspectedRecord }) {
+  return (
+    <pre className="payload-code">{JSON.stringify(record.payloadPreview, null, 2)}</pre>
   );
 }
 
